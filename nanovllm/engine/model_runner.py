@@ -19,6 +19,9 @@ class ModelRunner:
         hf_config = config.hf_config
         self.block_size = config.kvcache_block_size
         self.enforce_eager = config.enforce_eager
+        # tensor parallel 的 GPU 数量
+        # ＝ 模型 shard 的数量
+        # ＝ 用多少卡并行跑模型前向
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
@@ -60,6 +63,8 @@ class ModelRunner:
 
     def loop(self):
         while True:
+            # worker 进程循环逻辑
+            # 都会进入到同一个function
             method_name, args = self.read_shm()
             self.call(method_name, *args)
             if method_name == "exit":
@@ -75,16 +80,26 @@ class ModelRunner:
 
     def write_shm(self, method_name, *args):
         assert self.world_size > 1 and self.rank == 0
+        # 这里有减少序列化的需求吗？好像传递的是seq（似乎包含prompt），所以是有可能有需要的
         data = pickle.dumps([method_name, *args])
         n = len(data)
         self.shm.buf[0:4] = n.to_bytes(4, "little")
         self.shm.buf[4:n+4] = data
-        for event in self.event:
-            event.set()
+        for event in self.event:    # 通知所有。event 是每个 worker 的信号量
+            event.set()             # 所以说此处一般有负载均衡的逻辑
 
-    def call(self, method_name, *args):
+    def call(self, method_name, *args): # "run", seqs, is_prefill
+        # Rank=分布式计算系统中的并行 worker ID
+        # worker 可以是：
+        #     一张 GPU
+        #     一部分 GPU（例如 MIG slice）
+        #     整个 CPU 进程
+        #     整个节点的一个 worker
+        #     一个 TPU core
+        #     或者一个由多个 GPU 组成的进程组
+        # rank 0 一般是主进程，其他都是worker进程
         if self.world_size > 1 and self.rank == 0:
-            self.write_shm(method_name, *args)
+            self.write_shm(method_name, *args)  # 多卡情况下，主进程写入共享内存支持任务RPC
         method = getattr(self, method_name, None)
         return method(*args)
 
@@ -100,14 +115,16 @@ class ModelRunner:
         self.run(seqs, True)
         torch.cuda.empty_cache()
 
-    def allocate_kv_cache(self):
+    def allocate_kv_cache(self):    # 初始化 kvcache 相关参数，在显存开辟一个空间
         config = self.config
         hf_config = config.hf_config
         free, total = torch.cuda.mem_get_info()
         used = total - free
         peak = torch.cuda.memory_stats()["allocated_bytes.all.peak"]
         current = torch.cuda.memory_stats()["allocated_bytes.all.current"]
+        # 分在多个 GPU 上
         num_kv_heads = hf_config.num_key_value_heads // self.world_size
+        # 每个head只关注每个token的一部分，所以把所有head的维度加起来就是token总维度
         head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
         block_bytes = 2 * hf_config.num_hidden_layers * self.block_size * num_kv_heads * head_dim * hf_config.dtype.itemsize
         config.num_kvcache_blocks = int(total * config.gpu_memory_utilization - used - peak + current) // block_bytes
@@ -146,6 +163,10 @@ class ModelRunner:
             cu_seqlens_k.append(cu_seqlens_k[-1] + seqlen_k)
             max_seqlen_q = max(seqlen_q, max_seqlen_q)
             max_seqlen_k = max(seqlen_k, max_seqlen_k)
+
+            # eg. block_table = [5, 12, 18]. sequence 的 KV Cache 块分布在显卡上的 block 5,12,18中。一个block有512个kvcache slot（对应一个token）。只存旧kvcache block
+            # slot_mapping: 地址映射，新的token具体对应哪个kvcache slot。只存新kvcache位置
+            # 第一次跑 prefill，此时没有老的block → 直接跳过
             if not seq.block_table:    # warmup
                 continue
             start_block = start // self.block_size
@@ -161,6 +182,7 @@ class ModelRunner:
                 slot_mapping.extend(range(slot_start, slot_end))
         if cu_seqlens_k[-1] > cu_seqlens_q[-1]:    # prefix cache
             block_tables = self.prepare_block_tables(seqs)
+        # CPU->GPU 数据搬运
         input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
         cu_seqlens_q = torch.tensor(cu_seqlens_q, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
@@ -174,7 +196,7 @@ class ModelRunner:
         positions = []
         slot_mapping = []
         context_lens = []
-        for seq in seqs:
+        for seq in seqs:    # 每次只生成一个 token
             input_ids.append(seq.last_token)
             positions.append(len(seq) - 1)
             context_lens.append(len(seq))
@@ -194,9 +216,12 @@ class ModelRunner:
 
     @torch.inference_mode()
     def run_model(self, input_ids: torch.Tensor, positions: torch.Tensor, is_prefill: bool):
+        # prefill / 强制 eager / 大 batch → 走普通 PyTorch 前向
         if is_prefill or self.enforce_eager or input_ids.size(0) > 512:
             return self.model.compute_logits(self.model(input_ids, positions))
         else:
+            # Graph Replay = 不再逐层执行，而是重放一段 GPU 执行指令序列。相当于把多个kernel launch合成一次replay
+            # 在capture_cudagraph初始化图
             bs = input_ids.size(0)
             context = get_context()
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
@@ -212,9 +237,16 @@ class ModelRunner:
             return self.model.compute_logits(graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
+        # LLM 的每次 forward 都是 batch。
+        # prefill 把多个请求的 prompt 合并成 mega-batch，
+        # decode 把多个请求下一 token 合并成 tiny-batch。
+        # 所以说
+        # 跨请求 KV Cache 复用是天然成立的，因为本来就是很多个 request 一起跑一起在显存里
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
         logits = self.run_model(input_ids, positions, is_prefill)
+        # all-reduce之后的next token 候选表，放在rank0上
+        # 所以由rank0进行采样：根据概率分布选词
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
         reset_context()
         return token_ids

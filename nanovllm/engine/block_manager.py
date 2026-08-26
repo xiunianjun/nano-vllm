@@ -61,6 +61,7 @@ class BlockManager:
         num_new_blocks = seq.num_blocks
         for i in range(seq.num_blocks - 1):
             token_ids = seq.block(i)
+            # Chain the hash so a block only matches when the full prefix matches.
             h = self.compute_hash(token_ids, h)
             block_id = self.hash_to_block_id.get(h, -1)
             if block_id == -1 or self.blocks[block_id].token_ids != token_ids:
