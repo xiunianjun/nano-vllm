@@ -17,6 +17,7 @@ dependencies = [
     "transformers>=4.51.0",
     "flash-attn",
     "xxhash",
+    "huggingface-hub>=0.36.0",
 ]
 
 [project.urls]
@@ -25,3 +26,8 @@ Homepage="https://github.com/GeeeekExplorer/nano-vllm"
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["nanovllm*"]
+
+[tool.uv.workspace]
+members = [
+    "qwen3-demo",
+]

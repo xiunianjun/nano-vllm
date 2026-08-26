@@ -137,6 +137,10 @@ ENV/
 env.bak/
 venv.bak/
 
+# Local datasets and model weights
+/data/
+/models/
+
 # Spyder project settings
 .spyderproject
 .spyproject
