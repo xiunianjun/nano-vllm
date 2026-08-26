@@ -24,6 +24,8 @@ class Sequence:
         self.num_prompt_tokens = len(token_ids)
         self.num_cached_tokens = 0
         self.num_scheduled_tokens = 0
+        self.recompute_pending_tokens = 0
+        self.num_preemptions = 0
         self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
@@ -71,10 +73,10 @@ class Sequence:
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state)
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.block_table, last_state)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.block_table, last_state = state
+        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]

@@ -15,6 +15,19 @@ class Scheduler:
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
+        self.reset_metrics()
+
+    def reset_metrics(self):
+        self.metrics = {
+            "preemption_count": 0,
+            "recomputed_token_count": 0,
+        }
+
+    def get_metrics(self):
+        return {
+            "preemption_count": self.metrics["preemption_count"],
+            "recomputed_token_count": self.metrics["recomputed_token_count"],
+        }
 
     def is_finished(self):
         return not self.waiting and not self.running
@@ -44,6 +57,10 @@ class Scheduler:
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
             seq.num_scheduled_tokens = min(num_tokens, remaining)
+            if seq.recompute_pending_tokens:
+                recomputed = min(seq.num_scheduled_tokens, seq.recompute_pending_tokens)
+                self.metrics["recomputed_token_count"] += recomputed
+                seq.recompute_pending_tokens -= recomputed
             num_batched_tokens += seq.num_scheduled_tokens
             if seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens:
                 seq.status = SequenceStatus.RUNNING
@@ -73,6 +90,11 @@ class Scheduler:
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):
+        lost_tokens = seq.num_cached_tokens
+        if lost_tokens:
+            self.metrics["preemption_count"] += 1
+            seq.num_preemptions += 1
+            seq.recompute_pending_tokens += lost_tokens
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)

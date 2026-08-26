@@ -35,9 +35,13 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
+        self.request_start_times = {}
+        self.request_latencies = []
         atexit.register(self.exit)
 
     def exit(self):
+        if not hasattr(self, "model_runner"):
+            return
         self.model_runner.call("exit")
         del self.model_runner
         for p in self.ps:
@@ -48,6 +52,22 @@ class LLMEngine:
             prompt = self.tokenizer.encode(prompt)
         seq = Sequence(prompt, sampling_params)
         self.scheduler.add(seq)
+        return seq
+
+    def reset_metrics(self):
+        self.scheduler.reset_metrics()
+        self.request_start_times.clear()
+        self.request_latencies.clear()
+
+    def get_metrics(self):
+        metrics = self.scheduler.get_metrics()
+        latencies = self.request_latencies
+        metrics.update({
+            "request_latency_avg": sum(latencies) / len(latencies) if latencies else 0.0,
+            "request_latency_max": max(latencies) if latencies else 0.0,
+            "request_latency_min": min(latencies) if latencies else 0.0,
+        })
+        return metrics
 
     def step(self):
         seqs, is_prefill = self.scheduler.schedule()
@@ -69,8 +89,10 @@ class LLMEngine:
         pbar = tqdm(total=len(prompts), desc="Generating", dynamic_ncols=True, disable=not use_tqdm)
         if not isinstance(sampling_params, list):
             sampling_params = [sampling_params] * len(prompts)
+        start_time = perf_counter()
         for prompt, sp in zip(prompts, sampling_params):
-            self.add_request(prompt, sp)
+            seq = self.add_request(prompt, sp)
+            self.request_start_times[seq.seq_id] = start_time
         outputs = {}
         prefill_throughput = decode_throughput = 0.
         while not self.is_finished():
@@ -91,6 +113,7 @@ class LLMEngine:
             # seq_id: 请求编号；token_id: 词表编号
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids # 拼接后结果
+                self.request_latencies.append(perf_counter() - self.request_start_times.pop(seq_id, t))
                 if use_tqdm:
                     pbar.update(1)
         pbar.close()
