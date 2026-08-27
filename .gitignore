@@ -197,3 +197,8 @@ cython_debug/
 #  refer to https://docs.cursor.com/context/ignore-files
 .cursorignore
 .cursorindexingignore
+# Local FlashAttention environments and wheels
+/.venv-fa/
+/.venv-fa28/
+/wheels/
+

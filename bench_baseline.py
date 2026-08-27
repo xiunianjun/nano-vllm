@@ -25,6 +25,8 @@ def parse_args():
     parser.add_argument("--kv-cache-gb", type=float, default=None)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument("--warmup-iters", type=int, default=1)
+    parser.add_argument("--enable-prefix-cache", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-tqdm", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -39,6 +41,16 @@ def kv_cache_gb_to_blocks(model: str, kv_cache_gb: float, block_size: int, tenso
     head_dim = getattr(hf_config, "head_dim", hf_config.hidden_size // hf_config.num_attention_heads)
     block_bytes = 2 * hf_config.num_hidden_layers * block_size * num_kv_heads * head_dim * dtype.itemsize
     return int(kv_cache_gb * (1 << 30) // block_bytes)
+
+
+def make_requests(args, seed_offset: int = 0):
+    seed(args.seed + seed_offset)
+    prompts = [[randint(0, 10000) for _ in range(randint(args.min_input_len, args.max_input_len))] for _ in range(args.num_seqs)]
+    sampling_params = [
+        SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(args.min_output_len, args.max_output_len))
+        for _ in range(args.num_seqs)
+    ]
+    return prompts, sampling_params
 
 
 def main():
@@ -57,17 +69,16 @@ def main():
         gpu_memory_utilization=args.gpu_memory_utilization,
         kvcache_block_size=args.kvcache_block_size,
         num_kvcache_blocks=num_kvcache_blocks,
+        enable_prefix_cache=args.enable_prefix_cache,
     )
 
-    prompts = [[randint(0, 10000) for _ in range(randint(args.min_input_len, args.max_input_len))] for _ in range(args.num_seqs)]
-    sampling_params = [
-        SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=randint(args.min_output_len, args.max_output_len))
-        for _ in range(args.num_seqs)
-    ]
-
     llm.generate([[0]], SamplingParams(max_tokens=1), use_tqdm=False)
+    for i in range(args.warmup_iters):
+        warmup_prompts, warmup_sampling_params = make_requests(args, seed_offset=1000 + i)
+        llm.generate(warmup_prompts, warmup_sampling_params, use_tqdm=False)
     llm.reset_metrics()
 
+    prompts, sampling_params = make_requests(args)
     start = time.time()
     outputs = llm.generate(prompts, sampling_params, use_tqdm=args.use_tqdm)
     elapsed = time.time() - start
