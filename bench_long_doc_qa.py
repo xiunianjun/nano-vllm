@@ -16,15 +16,21 @@ GB = 1 << 30
 def parse_args():
     parser = argparse.ArgumentParser(description="LMCache-style long document QA baseline for nano-vLLM GPU prefix cache.")
     parser.add_argument("--model", default="/data/datasets/models-hf/Qwen3-8B")
+    parser.add_argument("--workload", choices=("long_doc_qa", "branching_prefix"), default="long_doc_qa")
     parser.add_argument("--document-length", type=int, default=2048)
     parser.add_argument("--query-length", type=int, default=64)
+    parser.add_argument("--root-length", type=int, default=512)
+    parser.add_argument("--branch-length", type=int, default=512)
+    parser.add_argument("--branch-count", type=int, default=None)
     parser.add_argument("--output-len", type=int, default=8)
     parser.add_argument("--num-documents", type=int, default=None)
     parser.add_argument("--target-working-set-gb", type=float, default=2.0)
     parser.add_argument("--gpu-kv-cache-gb", type=float, default=1.0)
     parser.add_argument("--repeat-count", type=int, default=1)
-    parser.add_argument("--repeat-mode", choices=("tile", "random", "interleave"), default="tile")
+    parser.add_argument("--repeat-mode", choices=("tile", "random", "interleave", "hot_cold"), default="tile")
     parser.add_argument("--shuffle-seed", type=int, default=0)
+    parser.add_argument("--hot-documents", type=int, default=2)
+    parser.add_argument("--hot-request-ratio", type=float, default=0.7)
     parser.add_argument("--max-model-len", type=int, default=None)
     parser.add_argument("--max-num-seqs", type=int, default=1)
     parser.add_argument("--max-num-batched-tokens", type=int, default=None)
@@ -59,7 +65,13 @@ def num_documents_for_working_set(hf_config, target_gb, document_length):
     return max(1, math.ceil(target_gb * GB / doc_bytes))
 
 
-def repeat_doc_ids(doc_ids, repeat_count, mode, seed):
+def branch_count_for_working_set(hf_config, target_gb, root_length, branch_length):
+    bytes_per_token = kv_bytes_per_token(hf_config)
+    target_tokens = target_gb * GB / bytes_per_token
+    return max(1, math.ceil((target_tokens - root_length) / branch_length))
+
+
+def repeat_doc_ids(doc_ids, repeat_count, mode, seed, hot_documents=2, hot_request_ratio=0.7):
     if mode == "tile":
         return doc_ids * repeat_count
     if mode == "interleave":
@@ -67,29 +79,53 @@ def repeat_doc_ids(doc_ids, repeat_count, mode, seed):
         for doc_id in doc_ids:
             out.extend([doc_id] * repeat_count)
         return out
-    out = doc_ids * repeat_count
+    if mode == "random":
+        out = doc_ids * repeat_count
+        rng = random.Random(seed)
+        rng.shuffle(out)
+        return out
+
+    assert mode == "hot_cold"
     rng = random.Random(seed)
-    rng.shuffle(out)
+    hot_count = max(1, min(hot_documents, len(doc_ids)))
+    hot_doc_ids = doc_ids[:hot_count]
+    cold_doc_ids = doc_ids[hot_count:] or hot_doc_ids
+    total_requests = len(doc_ids) * repeat_count
+    out = []
+    for _ in range(total_requests):
+        if rng.random() < hot_request_ratio:
+            out.append(rng.choice(hot_doc_ids))
+        else:
+            out.append(rng.choice(cold_doc_ids))
     return out
 
 
 def choose_token_ids(tokenizer):
     vocab_size = len(tokenizer)
     hi_id = tokenizer.encode(" hi", add_special_tokens=False)[0]
+    root_id = tokenizer.encode(" root", add_special_tokens=False)[0]
     warm_query_id = tokenizer.encode(" warm", add_special_tokens=False)[0]
     measured_query_id = tokenizer.encode(" query", add_special_tokens=False)[0]
     doc_base_id = min(1000, vocab_size - 4096)
     if doc_base_id < 0:
         doc_base_id = 1
-    return vocab_size, hi_id, warm_query_id, measured_query_id, doc_base_id
+    return vocab_size, hi_id, root_id, warm_query_id, measured_query_id, doc_base_id
 
 
-def make_prompt(doc_id, args, ids, warmup):
-    vocab_size, hi_id, warm_query_id, measured_query_id, doc_base_id = ids
+def make_prompt(doc_id, args, ids, warmup, query_variant=0):
+    vocab_size, hi_id, root_id, warm_query_id, measured_query_id, doc_base_id = ids
+    query_marker = warm_query_id if warmup else measured_query_id
+    variant_marker = (doc_base_id + 2048 + query_variant) % vocab_size
+    if args.workload == "branching_prefix":
+        branch_marker = (doc_base_id + doc_id) % vocab_size
+        root = [root_id] * args.root_length
+        branch = [branch_marker] + [hi_id] * (args.branch_length - 1)
+        query = [query_marker, variant_marker] + [hi_id] * max(0, args.query_length - 2)
+        return root + branch + query
+
     doc_marker = (doc_base_id + doc_id) % vocab_size
     document = [doc_marker] + [hi_id] * (args.document_length - 1)
-    query_marker = warm_query_id if warmup else measured_query_id
-    query = [query_marker] + [hi_id] * (args.query_length - 1)
+    query = [query_marker, variant_marker] + [hi_id] * max(0, args.query_length - 2)
     return document + query
 
 
@@ -120,14 +156,23 @@ def main():
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     ids = choose_token_ids(tokenizer)
 
-    num_documents = args.num_documents
-    if num_documents is None:
-        num_documents = num_documents_for_working_set(hf_config, args.target_working_set_gb, args.document_length)
+    if args.workload == "branching_prefix":
+        num_documents = args.branch_count
+        if num_documents is None:
+            num_documents = branch_count_for_working_set(
+                hf_config, args.target_working_set_gb, args.root_length, args.branch_length
+            )
+        reusable_prefix_length = args.root_length + args.branch_length
+    else:
+        num_documents = args.num_documents
+        if num_documents is None:
+            num_documents = num_documents_for_working_set(hf_config, args.target_working_set_gb, args.document_length)
+        reusable_prefix_length = args.document_length
 
     num_kvcache_blocks = kv_cache_gb_to_blocks(hf_config, args.gpu_kv_cache_gb, args.kvcache_block_size)
-    max_model_len = args.max_model_len or args.document_length + args.query_length + args.output_len + 8
+    max_model_len = args.max_model_len or reusable_prefix_length + args.query_length + args.output_len + 8
     max_num_batched_tokens = args.max_num_batched_tokens or max_model_len
-    prompt_length = args.document_length + args.query_length
+    prompt_length = reusable_prefix_length + args.query_length
     blocks_per_prompt = math.ceil(prompt_length / args.kvcache_block_size)
     if num_kvcache_blocks < blocks_per_prompt:
         raise ValueError(
@@ -136,9 +181,19 @@ def main():
         )
 
     doc_ids = list(range(num_documents))
-    warmup_prompts = [make_prompt(doc_id, args, ids, warmup=True) for doc_id in doc_ids]
-    measured_doc_ids = repeat_doc_ids(doc_ids, args.repeat_count, args.repeat_mode, args.shuffle_seed)
-    measured_prompts = [make_prompt(doc_id, args, ids, warmup=False) for doc_id in measured_doc_ids]
+    warmup_prompts = [make_prompt(doc_id, args, ids, warmup=True, query_variant=0) for doc_id in doc_ids]
+    measured_doc_ids = repeat_doc_ids(
+        doc_ids,
+        args.repeat_count,
+        args.repeat_mode,
+        args.shuffle_seed,
+        args.hot_documents,
+        args.hot_request_ratio,
+    )
+    measured_prompts = [
+        make_prompt(doc_id, args, ids, warmup=False, query_variant=i)
+        for i, doc_id in enumerate(measured_doc_ids)
+    ]
     sampling_params = SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=args.output_len)
 
     llm = LLM(
@@ -162,23 +217,35 @@ def main():
     llm.exit()
 
     bytes_per_token = kv_bytes_per_token(hf_config)
-    working_set_gb = num_documents * args.document_length * bytes_per_token / GB
+    if args.workload == "branching_prefix":
+        working_set_tokens = args.root_length + num_documents * args.branch_length
+    else:
+        working_set_tokens = num_documents * args.document_length
+    working_set_gb = working_set_tokens * bytes_per_token / GB
     gpu_cache_gb_actual = num_kvcache_blocks * args.kvcache_block_size * bytes_per_token / GB
-    total_document_tokens = len(measured_prompts) * args.document_length
+    total_document_tokens = len(measured_prompts) * reusable_prefix_length
     cached_doc_tokens_upper_bound = min(metrics["prefix_cache_reused_token_count"], total_document_tokens)
     document_recomputed_tokens_est = total_document_tokens - cached_doc_tokens_upper_bound
 
     result = {
         "model": args.model,
         "mode": "gpu_prefix_cache_recompute_baseline",
+        "workload": args.workload,
         "repeat_mode": args.repeat_mode,
         "repeat_count": args.repeat_count,
+        "hot_documents": args.hot_documents,
+        "hot_request_ratio": args.hot_request_ratio,
+        "measured_doc_ids": measured_doc_ids,
         "num_documents": num_documents,
         "document_length": args.document_length,
+        "root_length": args.root_length,
+        "branch_length": args.branch_length,
+        "reusable_prefix_length": reusable_prefix_length,
         "query_length": args.query_length,
         "output_len": args.output_len,
         "kv_bytes_per_token": bytes_per_token,
         "target_working_set_gb": args.target_working_set_gb,
+        "working_set_tokens": working_set_tokens,
         "working_set_gb_actual": working_set_gb,
         "gpu_kv_cache_gb_requested": args.gpu_kv_cache_gb,
         "gpu_kv_cache_gb_actual": gpu_cache_gb_actual,

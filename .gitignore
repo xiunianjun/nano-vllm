@@ -141,6 +141,9 @@ venv.bak/
 /data/
 /models/
 
+# Benchmark / smoke run outputs
+/results/
+
 # Spyder project settings
 .spyderproject
 .spyproject
