@@ -24,12 +24,18 @@ class Scheduler:
         self.metrics = {
             "preemption_count": 0,
             "recomputed_token_count": 0,
+            "prefill_token_count": 0,
+            "prefix_cache_lookup_count": 0,
+            "prefix_cache_reused_token_count": 0,
         }
 
     def get_metrics(self):
         return {
             "preemption_count": self.metrics["preemption_count"],
             "recomputed_token_count": self.metrics["recomputed_token_count"],
+            "prefill_token_count": self.metrics["prefill_token_count"],
+            "prefix_cache_lookup_count": self.metrics["prefix_cache_lookup_count"],
+            "prefix_cache_reused_token_count": self.metrics["prefix_cache_reused_token_count"],
         }
 
     def is_finished(self):
@@ -60,6 +66,8 @@ class Scheduler:
                     needs_swap_in = True
                 else:
                     num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+                    self.metrics["prefix_cache_lookup_count"] += 1
+                    self.metrics["prefix_cache_reused_token_count"] += num_cached_blocks * self.block_size
             else:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
@@ -72,6 +80,7 @@ class Scheduler:
                     seq.cpu_cached_tokens = 0
                     seq.is_swapped = False
             seq.num_scheduled_tokens = min(num_tokens, remaining)
+            self.metrics["prefill_token_count"] += seq.num_scheduled_tokens
             if seq.recompute_pending_tokens:
                 recomputed = min(seq.num_scheduled_tokens, seq.recompute_pending_tokens)
                 self.metrics["recomputed_token_count"] += recomputed
