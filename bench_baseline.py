@@ -10,7 +10,7 @@ from nanovllm import LLM, SamplingParams
 
 
 def parse_args():
-    parser = argparse.ArgumentParser(description="Recompute baseline benchmark.")
+    parser = argparse.ArgumentParser(description="KV pressure benchmark for recompute baseline and synchronous CPU offload.")
     parser.add_argument("--model", default="/data/datasets/models-hf/Qwen3-0.6B")
     parser.add_argument("--num-seqs", type=int, default=32)
     parser.add_argument("--min-input-len", type=int, default=100)
@@ -27,6 +27,7 @@ def parse_args():
     parser.add_argument("--seed", type=int, default=0)
     parser.add_argument("--warmup-iters", type=int, default=1)
     parser.add_argument("--enable-prefix-cache", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-tqdm", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -70,6 +71,7 @@ def main():
         kvcache_block_size=args.kvcache_block_size,
         num_kvcache_blocks=num_kvcache_blocks,
         enable_prefix_cache=args.enable_prefix_cache,
+        enable_cpu_kv_offload=args.enable_cpu_kv_offload,
     )
 
     llm.generate([[0]], SamplingParams(max_tokens=1), use_tqdm=False)
@@ -91,6 +93,7 @@ def main():
         "elapsed_sec": elapsed,
         "throughput_tok_per_sec": total_output_tokens / elapsed,
         "num_kvcache_blocks": num_kvcache_blocks,
+        "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
     })
     print(json.dumps(metrics, indent=2, sort_keys=True))
     llm.exit()

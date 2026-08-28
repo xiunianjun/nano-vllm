@@ -1,4 +1,5 @@
 import pickle
+from time import perf_counter
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -25,6 +26,8 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
+        self.cpu_kv_cache = {}
+        self.reset_swap_metrics()
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
@@ -137,6 +140,69 @@ class ModelRunner:
                 module.k_cache = self.kv_cache[0, layer_id]
                 module.v_cache = self.kv_cache[1, layer_id]
                 layer_id += 1
+
+
+    def reset_swap_metrics(self):
+        self.swap_metrics = {
+            "d2h_bytes": 0,
+            "h2d_bytes": 0,
+            "swap_out_count": 0,
+            "swap_in_count": 0,
+            "swap_out_latency_sum": 0.0,
+            "swap_in_latency_sum": 0.0,
+            "swap_out_latency_max": 0.0,
+            "swap_in_latency_max": 0.0,
+            "cpu_kv_bytes": sum(entry["bytes"] for entry in self.cpu_kv_cache.values()),
+            "cpu_kv_bytes_peak": 0,
+        }
+
+    def get_swap_metrics(self):
+        out_count = self.swap_metrics["swap_out_count"]
+        in_count = self.swap_metrics["swap_in_count"]
+        metrics = dict(self.swap_metrics)
+        metrics["swap_out_latency_avg"] = metrics["swap_out_latency_sum"] / out_count if out_count else 0.0
+        metrics["swap_in_latency_avg"] = metrics["swap_in_latency_sum"] / in_count if in_count else 0.0
+        return metrics
+
+    def swap_out(self, seq: Sequence):
+        num_tokens = seq.num_cached_tokens
+        num_blocks = (num_tokens + self.block_size - 1) // self.block_size
+        block_ids = torch.tensor(seq.block_table[:num_blocks], dtype=torch.long, device=self.kv_cache.device)
+        torch.cuda.synchronize()
+        start = perf_counter()
+        gpu_blocks = torch.index_select(self.kv_cache, 2, block_ids)
+        cpu_blocks = torch.empty(gpu_blocks.shape, dtype=gpu_blocks.dtype, device="cpu", pin_memory=True)
+        cpu_blocks.copy_(gpu_blocks, non_blocking=False)
+        torch.cuda.synchronize()
+        latency = perf_counter() - start
+
+        if seq.seq_id in self.cpu_kv_cache:
+            self.swap_metrics["cpu_kv_bytes"] -= self.cpu_kv_cache[seq.seq_id]["bytes"]
+        nbytes = cpu_blocks.numel() * cpu_blocks.element_size()
+        self.cpu_kv_cache[seq.seq_id] = {"blocks": cpu_blocks, "tokens": num_tokens, "num_blocks": num_blocks, "bytes": nbytes}
+        self.swap_metrics["d2h_bytes"] += nbytes
+        self.swap_metrics["swap_out_count"] += 1
+        self.swap_metrics["swap_out_latency_sum"] += latency
+        self.swap_metrics["swap_out_latency_max"] = max(self.swap_metrics["swap_out_latency_max"], latency)
+        self.swap_metrics["cpu_kv_bytes"] += nbytes
+        self.swap_metrics["cpu_kv_bytes_peak"] = max(self.swap_metrics["cpu_kv_bytes_peak"], self.swap_metrics["cpu_kv_bytes"])
+
+    def swap_in(self, seq: Sequence):
+        entry = self.cpu_kv_cache.pop(seq.seq_id)
+        block_ids = torch.tensor(seq.block_table[:entry["num_blocks"]], dtype=torch.long, device=self.kv_cache.device)
+        torch.cuda.synchronize()
+        start = perf_counter()
+        gpu_blocks = entry["blocks"].to(device=self.kv_cache.device, non_blocking=False)
+        self.kv_cache.index_copy_(2, block_ids, gpu_blocks)
+        torch.cuda.synchronize()
+        latency = perf_counter() - start
+
+        self.swap_metrics["h2d_bytes"] += entry["bytes"]
+        self.swap_metrics["swap_in_count"] += 1
+        self.swap_metrics["swap_in_latency_sum"] += latency
+        self.swap_metrics["swap_in_latency_max"] = max(self.swap_metrics["swap_in_latency_max"], latency)
+        self.swap_metrics["cpu_kv_bytes"] -= entry["bytes"]
+        seq.cpu_cached_tokens = entry["tokens"]
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)

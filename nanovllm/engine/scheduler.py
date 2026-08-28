@@ -12,6 +12,9 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
+        self.enable_cpu_kv_offload = config.enable_cpu_kv_offload
+        self.swap_out = None
+        self.swap_in = None
         self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.enable_prefix_cache)
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -45,17 +48,29 @@ class Scheduler:
             remaining = self.max_num_batched_tokens - num_batched_tokens
             if remaining == 0:
                 break
+            needs_swap_in = False
             if not seq.block_table:
                 num_cached_blocks = self.block_manager.can_allocate(seq)
                 if num_cached_blocks == -1:
                     break
-                num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
+                if seq.is_swapped:
+                    assert self.enable_cpu_kv_offload and self.swap_in is not None
+                    num_cached_blocks = 0
+                    num_tokens = seq.num_tokens - seq.cpu_cached_tokens
+                    needs_swap_in = True
+                else:
+                    num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
             else:
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
             if remaining < num_tokens and scheduled_seqs:  # only allow chunked prefill for the first seq
                 break
             if not seq.block_table:
                 self.block_manager.allocate(seq, num_cached_blocks)
+                if needs_swap_in:
+                    self.swap_in(seq)
+                    seq.num_cached_tokens = seq.cpu_cached_tokens
+                    seq.cpu_cached_tokens = 0
+                    seq.is_swapped = False
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             if seq.recompute_pending_tokens:
                 recomputed = min(seq.num_scheduled_tokens, seq.recompute_pending_tokens)
@@ -94,7 +109,13 @@ class Scheduler:
         if lost_tokens:
             self.metrics["preemption_count"] += 1
             seq.num_preemptions += 1
-            seq.recompute_pending_tokens += lost_tokens
+            if self.enable_cpu_kv_offload:
+                assert self.swap_out is not None
+                self.swap_out(seq)
+                seq.is_swapped = True
+                seq.cpu_cached_tokens = lost_tokens
+            else:
+                seq.recompute_pending_tokens += lost_tokens
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
         self.block_manager.deallocate(seq)
