@@ -36,8 +36,11 @@ class LLMEngine:
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
         if config.enable_cpu_kv_offload:
-            self.scheduler.swap_out = lambda seq: self.model_runner.call("swap_out", seq)
-            self.scheduler.swap_in = lambda seq: self.model_runner.call("swap_in", seq)
+            # Scheduler 只负责调度决策；真正搬 prefix KV tensor 的 D2H/H2D 操作必须在 ModelRunner 里做，
+            # 因为 kv_cache tensor、copy stream 和 CUDA event 都属于 model runner 进程/设备上下文。
+            self.scheduler.writeback_prefix_blocks = lambda entries: self.model_runner.call("writeback_prefix_blocks", entries)
+            self.scheduler.restore_prefix_blocks = lambda entries: self.model_runner.call("restore_prefix_blocks", entries)
+            self.scheduler.poll_prefix_writebacks = lambda wait=False: self.model_runner.call("poll_prefix_writebacks", wait)
         self.request_start_times = {}
         self.request_latencies = []
         atexit.register(self.exit)
@@ -59,13 +62,13 @@ class LLMEngine:
 
     def reset_metrics(self):
         self.scheduler.reset_metrics()
-        self.model_runner.call("reset_swap_metrics")
+        self.model_runner.call("reset_prefix_transfer_metrics")
         self.request_start_times.clear()
         self.request_latencies.clear()
 
     def get_metrics(self):
         metrics = self.scheduler.get_metrics()
-        metrics.update(self.model_runner.get_swap_metrics())
+        metrics.update(self.model_runner.get_prefix_transfer_metrics())
         latencies = self.request_latencies
         metrics.update({
             "request_latency_avg": sum(latencies) / len(latencies) if latencies else 0.0,

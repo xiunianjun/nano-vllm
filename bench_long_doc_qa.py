@@ -36,6 +36,7 @@ def parse_args():
     parser.add_argument("--max-num-batched-tokens", type=int, default=None)
     parser.add_argument("--kvcache-block-size", type=int, default=256)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
+    parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-tqdm", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -130,14 +131,11 @@ def make_prompt(doc_id, args, ids, warmup, query_variant=0):
 
 
 def run_round(llm, prompts, sampling_params, use_tqdm):
-    per_request_latencies = []
+    before = len(llm.request_latencies)
     round_start = time.perf_counter()
-    for prompt in prompts:
-        start = time.perf_counter()
-        llm.generate([prompt], sampling_params, use_tqdm=use_tqdm)
-        per_request_latencies.append(time.perf_counter() - start)
+    llm.generate(prompts, [sampling_params] * len(prompts), use_tqdm=use_tqdm)
     elapsed = time.perf_counter() - round_start
-    return elapsed, per_request_latencies
+    return elapsed, llm.request_latencies[before:]
 
 
 def summarize_latencies(latencies):
@@ -206,7 +204,7 @@ def main():
         kvcache_block_size=args.kvcache_block_size,
         num_kvcache_blocks=num_kvcache_blocks,
         enable_prefix_cache=True,
-        enable_cpu_kv_offload=False,
+        enable_cpu_kv_offload=args.enable_cpu_kv_offload,
     )
 
     llm.generate([[ids[1]]], SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1), use_tqdm=False)
@@ -224,12 +222,15 @@ def main():
     working_set_gb = working_set_tokens * bytes_per_token / GB
     gpu_cache_gb_actual = num_kvcache_blocks * args.kvcache_block_size * bytes_per_token / GB
     total_document_tokens = len(measured_prompts) * reusable_prefix_length
-    cached_doc_tokens_upper_bound = min(metrics["prefix_cache_reused_token_count"], total_document_tokens)
+    restored_tokens = metrics.get("cpu_prefix_cache_restored_token_count", 0)
+    reused_or_restored = metrics["prefix_cache_reused_token_count"] + restored_tokens
+    cached_doc_tokens_upper_bound = min(reused_or_restored, total_document_tokens)
     document_recomputed_tokens_est = total_document_tokens - cached_doc_tokens_upper_bound
 
     result = {
         "model": args.model,
-        "mode": "gpu_prefix_cache_recompute_baseline",
+        "mode": "cpu_prefix_cache_v1" if args.enable_cpu_kv_offload else "gpu_prefix_cache_recompute_baseline",
+        "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
         "workload": args.workload,
         "repeat_mode": args.repeat_mode,
         "repeat_count": args.repeat_count,

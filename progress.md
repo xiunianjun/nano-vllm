@@ -90,102 +90,157 @@ results/prefix_cache_cases/<run_name>/
 
 当前不使用 ShareGPT，不引入真实长文档数据集。文档和 branch 都用 synthetic token IDs 生成。
 
-## 新实现路线
+## 当前 V1 实现
 
-### V1: CPU Prefix Cache Offload
+### 目标
 
-目标：先实现正确的 GPU + CPU 两级 prefix cache，不做复杂调度预取。
-
-#### 主动写回
-
-当一个 request 完成后，将它已经计算出的 reusable prefix KV 写回 CPU memory。
+V1 已经从旧的 request-level preemption swapping，调整为当前主线需要的 **CPU prefix cache backing store**：
 
 ```text
-request finished
--> GPU KV still remains available
--> async D2H writeback to CPU pinned memory
--> CPU copy becomes reusable after copy finishes
-```
-
-这里 GPU KV 不需要因为写回 CPU 而立即释放。一个 prefix block 可以同时存在于 GPU 和 CPU：
-
-```text
-GPU_RESIDENT + CPU_RESIDENT
-```
-
-如果 GPU 显存还够，可以先调度下一个请求，再在 copy stream 上异步写回刚完成 request 的 KV，从而和后续计算 overlap。
-
-异步 D2H 的完成通知机制：
-
-```text
-copy_stream:
-  cpu_tensor.copy_(gpu_tensor, non_blocking=True)
-  event.record(copy_stream)
-
-later:
-  if event.query():
-      state = CPU_RESIDENT
-```
-
-也就是说，CUDA event 是完成通知。写回完成前，对应 GPU block 不能被别人覆盖，否则 CPU copy 会读到不完整或错误数据。状态上可以记为：
-
-```text
-WRITEBACK_PENDING / EVICTING
-```
-
-完成后才允许该 GPU block 进入可回收状态。
-
-#### 读入 request
-
-调度新 request 时查 prefix：
-
-```text
-GPU hit
+GPU prefix hit
 -> 直接复用 GPU KV
 
-GPU miss + CPU hit
--> 同步 H2D restore 到 GPU
+GPU miss + CPU prefix hit
+-> 同步 H2D restore 到 GPU KV block
 -> 跳过对应 prefix prefill
 
 GPU miss + CPU miss
--> 正常 prefill/recompute
+-> 正常 prefill / recompute
 ```
 
-第一版 `swapin` 可以先同步实现，保证正确性。若 GPU 空间不足，则触发 eviction。
+当前 V1 不做复杂 scheduler-aware prefetch，也不做 OPT eviction。重点是先保证 GPU+CPU 两级 prefix cache 的状态和 benchmark 语义正确。
 
-#### 抢占 / 驱逐
-
-eviction 优先级：
+### Prefix 写回时机
 
 ```text
-1. 优先驱逐已经 CPU_RESIDENT 的 GPU blocks
-   -> 只释放/覆盖 GPU copy，不需要 D2H
-
-2. 若没有可直接驱逐的 clean blocks
-   -> 按 LRU 选择 victim
-   -> 同步 D2H 写回 CPU
-   -> 再释放/覆盖 GPU block
+request prompt prefill 完成
+-> 已形成完整 block hash 的 prefix blocks 立刻启动 async D2H writeback
+-> request 继续进入 decode
 ```
 
-第一版先追求状态正确和 benchmark 可解释，不急着做最优 overlap。
+这样可以覆盖一种重要情况：request prefill 完后进入 decode，如果 decode 阶段又因为显存压力被抢占，它的 prompt prefix 已经有机会在 CPU 上留下 backing copy。
 
-### V2: Scheduler-Aware Prefetch
-
-在 V1 正确后，再利用调度信息优化 eviction 和 prefetch。
-
-#### OPT-like eviction
-
-驱逐时 inspect 当前 benchmark/scheduler 队列，选择未来窗口内最晚再次被访问的 prefix block：
+decode 新生成的 tokens 当前 **不主动纳入 prefix cache**。这点和 vLLM 的策略更接近：
 
 ```text
-evict block whose next use is farthest in the future
+prompt prefill prefix -> 可以进入 prefix cache
+new decode tokens -> 先不进入 prefix cache
+后续请求重新 prefill 形成完整 block 后 -> 再纳入 prefix cache
 ```
 
-这接近 OPT 策略，适合作为研究型 upper-bound / oracle policy。
+### 写回去重
 
-#### 主动预取
+V1 写回前会做去重，避免重复 D2H：
 
-调度当前 request 后，如果 GPU KV 还有空间，可以提前把后续请求可能需要的 CPU-resident KV copy 回 GPU：
+```text
+CPU 已经有相同 prefix block
+-> skip writeback
+
+相同 prefix block 正在 pending writeback
+-> skip writeback
+
+CPU 没有且 pending 也没有
+-> 发起 async D2H writeback
+```
+
+当前去重依据是 block hash + token_ids 校验：
+
+- `BlockManager.cpu_hash_to_token_ids` 保存 CPU prefix cache 的元数据。
+- `Scheduler._pending_writeback_hashes()` 保存正在写回的 prefix hash。
+- `ModelRunner.cpu_prefix_cache` 保存真正的 CPU KV tensor。
+
+### Pending / Protected Block
+
+异步写回通过独立 CUDA copy stream 发起：
+
+```text
+copy_stream:
+  cpu_block.copy_(gpu_block, non_blocking=True)
+  done_event.record()
+```
+
+Python 侧没有使用回调，而是由 scheduler 轮询 CUDA event：
+
+```text
+done_event.query()       # 非阻塞检查
+done_event.synchronize() # 必要时阻塞等待
+```
+
+写回未完成前，对应 GPU block 处于 protected 状态，不能回到 free list。否则新的 request 可能覆盖这个 block，导致 CPU copy 读到错误 KV。
+
+当前状态由几处结构共同表达：
+
+- GPU resident: `BlockManager.hash_to_block_id`
+- CPU resident: `BlockManager.cpu_hash_to_token_ids` + `ModelRunner.cpu_prefix_cache`
+- writeback pending: `Scheduler.pending_prefix_writebacks`
+- per-request writeback started: `Sequence.prefix_writeback_started`
+
+### Request 读入
+
+调度 waiting request 时，`BlockManager.get_allocate_plan()` 查找从 prompt 开头开始的最长连续 prefix：
+
+```text
+1. GPU hit: 直接引用已有 GPU block
+2. CPU hit: 分配新的 GPU block，加入 restore_entries
+3. miss: 停止 prefix lookup，剩余 token 正常 prefill
+```
+
+如果存在 `restore_entries`，scheduler 会调用 `ModelRunner.restore_prefix_blocks()` 做同步 H2D restore。restore 完成后，才继续 prefill 剩余 query suffix。
+
+### 抢占语义
+
+当前 preemption 不是主实验路径，只保留作 sanity。开启 CPU prefix offload 时，抢占会处理 pending writeback 的保护：
+
+```text
+request 被抢占
+-> 如果某些 blocks 正在 D2H writeback，标记 release_on_complete
+-> 释放其他 blocks
+-> pending blocks 等 D2H 完成后再释放
+```
+
+因此不会强制释放正在写回的 block。若写回较慢并导致显存暂时不足，V1 选择等待 pending writeback 完成，优先保证正确性。
+
+`recompute_pending_tokens` 在 CPU prefix offload 场景下按 V1 invariant 简化：完整 prefix blocks 已经在 CPU 上或正在 pending writeback，不计入 recompute；只有 decode 阶段最后一个未满 block 计入。
+
+之前考虑过逐 block 检查 CPU backing / pending 状态。那种写法能覆盖 chunked prefill 未完成、hash 状态异常、后续 eviction/prefetch 引入不一致等复杂情况，但当前 V1 先保持更清晰的语义：prefill 完立即写回完整 prefix block，decode 新 tokens 暂不纳入 prefix cache。
+
+### 已验证 Smoke Test
+
+#### 重复 prompt 去重
+
+同一个 prompt 连续请求两次，第二次不再重复写回同一个 prefix block：
+
+```text
+cpu_prefix_writeback_count = 1
+cpu_prefix_d2h_bytes = 29360128
+```
+
+说明 CPU 已有 backing copy 时，写回前去重生效。
+
+#### CPU restore
+
+使用小 GPU cache 跑：
+
+```text
+D0 -> D1 -> D0
+```
+
+第三次 `D0` 发生 GPU miss，但 CPU prefix cache 命中并 restore：
+
+```text
+cpu_prefix_writeback_count = 2
+cpu_prefix_cache_hit_count = 1
+cpu_prefix_restore_count = 1
+cpu_prefix_restored_token_count = 256
+```
+
+说明 GPU miss + CPU hit -> H2D restore -> skip prefix prefill 的路径已经可用。
+
+## 后续 V2 方向
+
+### Scheduler-Aware Prefetch
+
+V2 再做调度协同：调度当前 request 后，如果 GPU KV 还有空间，可以提前把后续请求可能需要的 CPU-resident KV copy 回 GPU。
 
 ```text
 current request running
@@ -194,15 +249,24 @@ next likely request has CPU KV but no GPU KV
 -> async H2D prefetch
 ```
 
-预取同样需要状态保护：
+### OPT-like Eviction
+
+驱逐时 inspect 当前 benchmark/scheduler 队列，选择未来窗口内最晚再次访问的 prefix block：
 
 ```text
-PREFETCHING
-GPU_RESIDENT
-CPU_RESIDENT
+evict block whose next use is farthest in the future
 ```
 
-`PREFETCHING` 完成前不能被当作完整 GPU hit。完成通知仍使用 CUDA event。
+这可以作为研究型 oracle policy，用于评估调度和 cache 协同的收益上界。
+
+### Pending Writeback Backpressure
+
+V1 为了正确性会保护 pending blocks。V2 可以进一步控制这件事：
+
+- 限制 pending writeback 的 block 数或总 bytes。
+- 优先写回 hot prefix。
+- 当显存紧张时优先等待最早完成的 pending copy。
+- 暂不建议强制释放正在 D2H 的 block，除非同时设计安全的 abort/ignore 机制。
 
 ## 已实现 Workload Case
 
@@ -315,6 +379,32 @@ results/prefix_cache_cases/latest_smoke/
 - `hot_cold_sharing` 同时出现 reuse 和 recompute，适合作为主线 document-level sharing baseline。
 - `branching_prefix_sharing` reuse 更多，说明部分 prefix sharing 已经能被 nano-vLLM 的 GPU prefix cache 捕获。
 
+
+## V1 CPU Prefix Cache Smoke 结果
+
+本轮结果目录：
+
+```text
+results/prefix_cache_cases/v1_smoke/
+```
+
+| case | mode | prefix reused tokens | CPU restored tokens | estimated recomputed prefix tokens | prefill tokens | query elapsed |
+|---|---|---:|---:|---:|---:|---:|
+| cascade_tile | GPU-only | 0 | 0 | 8192 | 8704 | 1.79 s |
+| cascade_tile | CPU V1 | 0 | 8192 | 0 | 512 | 1.90 s |
+| hot_cold_sharing | GPU-only | 25344 | 0 | 7424 | 9472 | 7.07 s |
+| hot_cold_sharing | CPU V1 | 25344 | 7424 | 0 | 2048 | 7.21 s |
+| branching_prefix_sharing | GPU-only | 52736 | 0 | 4608 | 8192 | 12.59 s |
+| branching_prefix_sharing | CPU V1 | 52736 | 4608 | 0 | 3584 | 12.88 s |
+
+观察：
+
+- V1 的 CPU backing store 已能在 GPU miss 后 restore prefix KV，并跳过对应 prefix prefill。
+- 三个 case 中，GPU-only 的 prefix recompute 都被 CPU V1 消除。
+- 当前 V1 已将 request-finished writeback 改为 `copy_stream + CUDA event` 异步 D2H；完成前 GPU blocks 会被延迟释放。
+- CPU hit 后的 H2D restore 仍是同步等待，因为当前 request 继续 prefill 前必须保证 KV 已在 GPU。
+- 下一步性能优化重点是 clean block eviction、减少重复 writeback、scheduler-aware prefetch。
+
 ## 指标说明
 
 当前 prefix-cache 主线主要看：
@@ -332,8 +422,8 @@ results/prefix_cache_cases/latest_smoke/
 
 1. 固化当前 GPU-only prefix cache baseline，作为 V1/V2 对照组。
 2. 实现 logical block 粒度的 CPU prefix cache backing store。
-3. request 完成时主动写回 CPU，并维护 `GPU_RESIDENT`、`WRITEBACK_PENDING`、`CPU_RESIDENT` 等状态。
+3. request 完成时通过 `copy_stream + CUDA event` 异步写回 CPU，并在完成前延迟释放对应 GPU blocks。
 4. GPU miss + CPU hit 时同步 restore 到 GPU，并跳过对应 prefix prefill。
 5. eviction 优先驱逐已经 CPU-resident 的 clean GPU blocks；否则 LRU 同步写回。
-6. V1 正确后，再实现 scheduler-aware OPT eviction 和 async prefetch。
+6. 后续实现 scheduler-aware OPT eviction 和 async prefetch。
 7. 用 `cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing` 对比 GPU-only 与 GPU+CPU。

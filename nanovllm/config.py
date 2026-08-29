@@ -17,6 +17,7 @@ class Config:
     kvcache_block_size: int = 256
     num_kvcache_blocks: int = -1
     enable_prefix_cache: bool = True
+    # 打开后启用 V1 GPU+CPU 两级 prefix cache；权重仍常驻 GPU，只 offload prefix KV blocks。
     enable_cpu_kv_offload: bool = False
 
     def __post_init__(self):

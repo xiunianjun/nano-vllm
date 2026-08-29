@@ -1,5 +1,4 @@
 import pickle
-from time import perf_counter
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -26,8 +25,13 @@ class ModelRunner:
         self.world_size = config.tensor_parallel_size
         self.rank = rank
         self.event = event
-        self.cpu_kv_cache = {}
-        self.reset_swap_metrics()
+        # V1 prefix offload: 以 prefix block hash 为 key 保存 CPU backing KV。
+        # request 完成后 GPU KV 不立刻清空；只要 block 尚未被覆盖，GPU/CPU 可以同时持有同一份 prefix。
+        self.cpu_prefix_cache = {}
+        # 异步 writeback 的完成状态由 CUDA event 标记，Scheduler 轮询完成后再释放 protected GPU block。
+        self.pending_prefix_writebacks = []
+        self.next_prefix_writeback_id = 0
+        self.reset_prefix_transfer_metrics()
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
         torch.cuda.set_device(rank)
@@ -39,6 +43,8 @@ class ModelRunner:
         self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
+        # 独立 copy stream 用于 D2H/H2D，给后续 compute/copy overlap 留出空间。
+        self.copy_stream = torch.cuda.Stream()
         if not self.enforce_eager:
             self.capture_cudagraph()
         torch.set_default_device("cpu")
@@ -142,67 +148,140 @@ class ModelRunner:
                 layer_id += 1
 
 
-    def reset_swap_metrics(self):
-        self.swap_metrics = {
-            "d2h_bytes": 0,
-            "h2d_bytes": 0,
-            "swap_out_count": 0,
-            "swap_in_count": 0,
-            "swap_out_latency_sum": 0.0,
-            "swap_in_latency_sum": 0.0,
-            "swap_out_latency_max": 0.0,
-            "swap_in_latency_max": 0.0,
-            "cpu_kv_bytes": sum(entry["bytes"] for entry in self.cpu_kv_cache.values()),
-            "cpu_kv_bytes_peak": 0,
+    def reset_prefix_transfer_metrics(self):
+        self.prefix_transfer_metrics = {
+            # prefix-cache 主线指标：writeback 是完成请求后的主动 D2H，restore 是 CPU hit 后的同步 H2D。
+            "cpu_prefix_writeback_count": 0,
+            "cpu_prefix_restore_count": 0,
+            "cpu_prefix_d2h_bytes": 0,
+            "cpu_prefix_h2d_bytes": 0,
+            "cpu_prefix_kv_bytes": sum(entry["bytes"] for entry in self.cpu_prefix_cache.values()),
+            "cpu_prefix_kv_bytes_peak": 0,
+            "cpu_prefix_writeback_latency_sum": 0.0,
+            "cpu_prefix_restore_latency_sum": 0.0,
+            "cpu_prefix_writeback_latency_max": 0.0,
+            "cpu_prefix_restore_latency_max": 0.0,
         }
 
-    def get_swap_metrics(self):
-        out_count = self.swap_metrics["swap_out_count"]
-        in_count = self.swap_metrics["swap_in_count"]
-        metrics = dict(self.swap_metrics)
-        metrics["swap_out_latency_avg"] = metrics["swap_out_latency_sum"] / out_count if out_count else 0.0
-        metrics["swap_in_latency_avg"] = metrics["swap_in_latency_sum"] / in_count if in_count else 0.0
+    def get_prefix_transfer_metrics(self):
+        metrics = dict(self.prefix_transfer_metrics)
+        writeback_count = metrics["cpu_prefix_writeback_count"]
+        restore_count = metrics["cpu_prefix_restore_count"]
+        # CUDA event 记录的是整批 block copy 的时间，这里按批次求平均。
+        metrics["cpu_prefix_writeback_latency_avg"] = metrics["cpu_prefix_writeback_latency_sum"] / writeback_count if writeback_count else 0.0
+        metrics["cpu_prefix_restore_latency_avg"] = metrics["cpu_prefix_restore_latency_sum"] / restore_count if restore_count else 0.0
         return metrics
 
-    def swap_out(self, seq: Sequence):
-        num_tokens = seq.num_cached_tokens
-        num_blocks = (num_tokens + self.block_size - 1) // self.block_size
-        block_ids = torch.tensor(seq.block_table[:num_blocks], dtype=torch.long, device=self.kv_cache.device)
-        torch.cuda.synchronize()
-        start = perf_counter()
-        gpu_blocks = torch.index_select(self.kv_cache, 2, block_ids)
-        cpu_blocks = torch.empty(gpu_blocks.shape, dtype=gpu_blocks.dtype, device="cpu", pin_memory=True)
-        cpu_blocks.copy_(gpu_blocks, non_blocking=False)
-        torch.cuda.synchronize()
-        latency = perf_counter() - start
+    def _record_completed_prefix_writeback(self, pending):
+        # D2H event 已完成后才把 CPU tensor 放入正式 cache；
+        # 这样 Scheduler 看到 CPU hit 时，一定能安全地从 cpu_prefix_cache 取到完整 KV。
+        bytes_written = 0
+        for h, cpu_block in pending["blocks"]:
+            nbytes = cpu_block.numel() * cpu_block.element_size()
+            old = self.cpu_prefix_cache.get(h)
+            if old is not None:
+                # 相同 prefix 被再次写回时覆盖旧 CPU backing，避免 CPU occupancy 重复计数。
+                self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= old["bytes"]
+            self.cpu_prefix_cache[h] = {"block": cpu_block, "bytes": nbytes}
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] += nbytes
+            bytes_written += nbytes
 
-        if seq.seq_id in self.cpu_kv_cache:
-            self.swap_metrics["cpu_kv_bytes"] -= self.cpu_kv_cache[seq.seq_id]["bytes"]
-        nbytes = cpu_blocks.numel() * cpu_blocks.element_size()
-        self.cpu_kv_cache[seq.seq_id] = {"blocks": cpu_blocks, "tokens": num_tokens, "num_blocks": num_blocks, "bytes": nbytes}
-        self.swap_metrics["d2h_bytes"] += nbytes
-        self.swap_metrics["swap_out_count"] += 1
-        self.swap_metrics["swap_out_latency_sum"] += latency
-        self.swap_metrics["swap_out_latency_max"] = max(self.swap_metrics["swap_out_latency_max"], latency)
-        self.swap_metrics["cpu_kv_bytes"] += nbytes
-        self.swap_metrics["cpu_kv_bytes_peak"] = max(self.swap_metrics["cpu_kv_bytes_peak"], self.swap_metrics["cpu_kv_bytes"])
+        latency = pending["start_event"].elapsed_time(pending["done_event"]) / 1000
+        self.prefix_transfer_metrics["cpu_prefix_writeback_count"] += len(pending["blocks"])
+        self.prefix_transfer_metrics["cpu_prefix_d2h_bytes"] += bytes_written
+        self.prefix_transfer_metrics["cpu_prefix_writeback_latency_sum"] += latency
+        self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"] = max(self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"], latency)
+        self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"] = max(
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
+        )
 
-    def swap_in(self, seq: Sequence):
-        entry = self.cpu_kv_cache.pop(seq.seq_id)
-        block_ids = torch.tensor(seq.block_table[:entry["num_blocks"]], dtype=torch.long, device=self.kv_cache.device)
-        torch.cuda.synchronize()
-        start = perf_counter()
-        gpu_blocks = entry["blocks"].to(device=self.kv_cache.device, non_blocking=False)
-        self.kv_cache.index_copy_(2, block_ids, gpu_blocks)
-        torch.cuda.synchronize()
-        latency = perf_counter() - start
+    def poll_prefix_writebacks(self, wait: bool = False):
+        # CUDA 没有 Python 层自动回调；这里用 done_event.query() 判断 async D2H 是否完成。
+        # query() 是非阻塞检查，synchronize() 是阻塞等待。
+        if wait and self.pending_prefix_writebacks:
+            # V1 只在需要完全 drain pending writes 时阻塞等待；普通调度路径走 query()。
+            self.pending_prefix_writebacks[0]["done_event"].synchronize()
 
-        self.swap_metrics["h2d_bytes"] += entry["bytes"]
-        self.swap_metrics["swap_in_count"] += 1
-        self.swap_metrics["swap_in_latency_sum"] += latency
-        self.swap_metrics["swap_in_latency_max"] = max(self.swap_metrics["swap_in_latency_max"], latency)
-        self.swap_metrics["cpu_kv_bytes"] -= entry["bytes"]
-        seq.cpu_cached_tokens = entry["tokens"]
+        completed_ids = []
+        still_pending = []
+        for pending in self.pending_prefix_writebacks:
+            if pending["done_event"].query():
+                self._record_completed_prefix_writeback(pending)
+                completed_ids.append(pending["id"])
+            else:
+                still_pending.append(pending)
+        self.pending_prefix_writebacks = still_pending
+        return completed_ids
+
+    def writeback_prefix_blocks(self, entries):
+        # 主动写回：request 完成后把已完成 hash 的 prefix KV 异步搬到 CPU pinned memory。
+        # 注意：D2H 还没完成前，对应 GPU block 仍然是 protected，不能被其他 request 占用。
+        if not entries:
+            return None
+
+        writeback_id = self.next_prefix_writeback_id
+        self.next_prefix_writeback_id += 1
+        # compute_done 用来保证 copy stream 不会读到尚未写完的 GPU KV。
+        # start/done event 一方面给 Scheduler 提供完成通知，一方面统计 D2H latency。
+        compute_done = torch.cuda.Event()
+        start_event = torch.cuda.Event(enable_timing=True)
+        done_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.current_stream().record_event(compute_done)
+
+        blocks = []
+        with torch.cuda.stream(self.copy_stream):
+            # 等当前 compute stream 写完 KV 后，再在 copy stream 上开始 D2H。
+            self.copy_stream.wait_event(compute_done)
+            start_event.record()
+            for h, block_id in entries:
+                gpu_block = self.kv_cache[:, :, block_id]
+                cpu_block = torch.empty(gpu_block.shape, dtype=gpu_block.dtype, device="cpu", pin_memory=True)
+                # pinned CPU tensor + non_blocking=True 才能让 D2H 真正排到 copy stream 上异步执行。
+                cpu_block.copy_(gpu_block, non_blocking=True)
+                blocks.append((h, cpu_block))
+            done_event.record()
+
+        # 此时 copy 可能还没完成；先记录 pending，让 Scheduler 暂时保护这些 GPU blocks。
+        self.pending_prefix_writebacks.append({
+            "id": writeback_id,
+            "blocks": blocks,
+            "start_event": start_event,
+            "done_event": done_event,
+        })
+        return writeback_id
+
+    def _copy_cpu_blocks_to_gpu(self, block_copies):
+        # block_copies 是 (CPU KV block, 新 GPU block id)，目前用于 CPU prefix restore。
+        bytes_read = 0
+        for cpu_block, block_id in block_copies:
+            self.kv_cache[:, :, block_id].copy_(cpu_block, non_blocking=True)
+            bytes_read += cpu_block.numel() * cpu_block.element_size()
+        return bytes_read
+
+    def restore_prefix_blocks(self, entries):
+        # 读入 request：GPU miss + CPU hit 时，同步 H2D restore 到新分配的 GPU block，
+        # restore 完成后才能跳过这段 prefix prefill。
+        if not entries:
+            return
+        compute_done = torch.cuda.Event()
+        start_event = torch.cuda.Event(enable_timing=True)
+        done_event = torch.cuda.Event(enable_timing=True)
+        torch.cuda.current_stream().record_event(compute_done)
+        # entries 来自 BlockManager.allocate，GPU block 已经占住；这里只负责把 CPU KV 填进去。
+        block_copies = [(self.cpu_prefix_cache[h]["block"], block_id) for h, block_id in entries]
+        with torch.cuda.stream(self.copy_stream):
+            # H2D 也走 copy stream；V1 这里随后 synchronize，语义上是同步 swapin/restore。
+            self.copy_stream.wait_event(compute_done)
+            start_event.record()
+            bytes_read = self._copy_cpu_blocks_to_gpu(block_copies)
+            done_event.record()
+        # V1 restore 是同步语义：必须等 H2D 完成，后续 attention 才能安全跳过 restored prefix。
+        done_event.synchronize()
+        latency = start_event.elapsed_time(done_event) / 1000
+        self.prefix_transfer_metrics["cpu_prefix_restore_count"] += len(entries)
+        self.prefix_transfer_metrics["cpu_prefix_h2d_bytes"] += bytes_read
+        self.prefix_transfer_metrics["cpu_prefix_restore_latency_sum"] += latency
+        self.prefix_transfer_metrics["cpu_prefix_restore_latency_max"] = max(self.prefix_transfer_metrics["cpu_prefix_restore_latency_max"], latency)
 
     def prepare_block_tables(self, seqs: list[Sequence]):
         max_len = max(len(seq.block_table) for seq in seqs)

@@ -26,8 +26,9 @@ class Sequence:
         self.num_scheduled_tokens = 0
         self.recompute_pending_tokens = 0
         self.num_preemptions = 0
-        self.is_swapped = False # request 的 KV 是否在 CPU 上
-        self.cpu_cached_tokens = 0  # CPU 上保存了多少 token 的 KV
+        # V1 prefix offload: prompt prefill 完成后只主动写回一次 CPU backing KV。
+        # decode 新产生的 tokens 暂时不进入 prefix cache，后续请求重新 prefill 后再纳入。
+        self.prefix_writeback_started = False
         self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
@@ -64,9 +65,15 @@ class Sequence:
     def last_block_num_tokens(self):
         return self.num_tokens - (self.num_blocks - 1) * self.block_size
 
+    def block_token_ids(self, local_block_idx):
+        # prefix cache 用完整 block token_ids 做 hash 校验；单独封装方便 GPU/CPU 两级 cache 共用。
+        assert 0 <= local_block_idx < self.num_blocks
+        start = local_block_idx * self.block_size
+        end = start + self.block_size
+        return self.token_ids[start:end]
+
     def block(self, i):
-        assert 0 <= i < self.num_blocks
-        return self.token_ids[i*self.block_size: (i+1)*self.block_size]
+        return self.block_token_ids(i)
 
     def append_token(self, token_id: int):
         self.token_ids.append(token_id)
@@ -75,10 +82,14 @@ class Sequence:
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.is_swapped, self.cpu_cached_tokens, self.block_table, last_state)
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.prefix_writeback_started, self.block_table, last_state)
 
     def __setstate__(self, state):
-        self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.is_swapped, self.cpu_cached_tokens, self.block_table, last_state = state
+        if len(state) == 8:
+            self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.block_table, last_state = state
+            self.prefix_writeback_started = False
+        else:
+            self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.prefix_writeback_started, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]

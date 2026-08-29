@@ -33,16 +33,23 @@ run_case() {
   echo "[$(date '+%F %T')] wrote $output"
 }
 
+run_pair() {
+  local name="$1"
+  shift
+  run_case "${name}_gpu_only" --no-enable-cpu-kv-offload "$@"
+  run_case "${name}_cpu_v1" --enable-cpu-kv-offload "$@"
+}
+
 # Case 1: sequential scan over a working set that is slightly larger than GPU KV.
 # This intentionally exposes cascading cache pollution / thrashing.
-run_case cascade_tile \
+run_pair cascade_tile \
   --workload long_doc_qa \
   --repeat-mode tile \
   --repeat-count 1
 
 # Case 2: normal document-level prefix sharing with hot and cold documents.
 # Hot documents are revisited often; cold documents create pressure and misses.
-run_case hot_cold_sharing \
+run_pair hot_cold_sharing \
   --workload long_doc_qa \
   --repeat-mode hot_cold \
   --repeat-count 4 \
@@ -52,7 +59,7 @@ run_case hot_cold_sharing \
 
 # Case 3: partial prefix sharing across branched requests.
 # Different branches share a common root prefix; requests on the same branch share root+branch.
-run_case branching_prefix_sharing \
+run_pair branching_prefix_sharing \
   --workload branching_prefix \
   --root-length 512 \
   --branch-length 512 \
