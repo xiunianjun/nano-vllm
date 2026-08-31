@@ -1,4 +1,5 @@
 import pickle
+from time import perf_counter
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -161,6 +162,12 @@ class ModelRunner:
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
             "cpu_prefix_restore_latency_max": 0.0,
+            "prefill_prepare_wall_sec": 0.0,
+            "prefill_sample_prepare_wall_sec": 0.0,
+            "prefill_model_cuda_sec": 0.0,
+            "prefill_sampler_wall_sec": 0.0,
+            "prefill_model_runner_wall_sec": 0.0,
+            "prefill_model_runner_count": 0,
         }
 
     def get_prefix_transfer_metrics(self):
@@ -388,12 +395,34 @@ class ModelRunner:
         # decode 把多个请求下一 token 合并成 tiny-batch。
         # 所以说
         # 跨请求 KV Cache 复用是天然成立的，因为本来就是很多个 request 一起跑一起在显存里
+        run_start = perf_counter()
+        t = perf_counter()
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
+        prepare_wall = perf_counter() - t
+        t = perf_counter()
         temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        sample_prepare_wall = perf_counter() - t
+        start_event = done_event = None
+        if is_prefill:
+            start_event = torch.cuda.Event(enable_timing=True)
+            done_event = torch.cuda.Event(enable_timing=True)
+            start_event.record()
         logits = self.run_model(input_ids, positions, is_prefill)
+        if is_prefill:
+            done_event.record()
         # all-reduce之后的next token 候选表，放在rank0上
         # 所以由rank0进行采样：根据概率分布选词
+        t = perf_counter()
         token_ids = self.sampler(logits, temperatures).tolist() if self.rank == 0 else None
+        sampler_wall = perf_counter() - t
+        if is_prefill:
+            done_event.synchronize()
+            self.prefix_transfer_metrics["prefill_prepare_wall_sec"] += prepare_wall
+            self.prefix_transfer_metrics["prefill_sample_prepare_wall_sec"] += sample_prepare_wall
+            self.prefix_transfer_metrics["prefill_model_cuda_sec"] += start_event.elapsed_time(done_event) / 1000
+            self.prefix_transfer_metrics["prefill_sampler_wall_sec"] += sampler_wall
+            self.prefix_transfer_metrics["prefill_model_runner_wall_sec"] += perf_counter() - run_start
+            self.prefix_transfer_metrics["prefill_model_runner_count"] += 1
         reset_context()
         return token_ids
 

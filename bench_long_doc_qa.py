@@ -2,6 +2,7 @@ import argparse
 import json
 import math
 import random
+import statistics
 import time
 
 import torch
@@ -28,6 +29,9 @@ def parse_args():
     parser.add_argument("--gpu-kv-cache-gb", type=float, default=1.0)
     parser.add_argument("--repeat-count", type=int, default=1)
     parser.add_argument("--repeat-mode", choices=("tile", "random", "interleave", "hot_cold"), default="tile")
+    parser.add_argument("--arrival-mode", choices=("batch", "poisson"), default="batch")
+    parser.add_argument("--request-rate", type=float, default=None, help="Poisson arrival rate in requests/sec.")
+    parser.add_argument("--arrival-seed", type=int, default=0)
     parser.add_argument("--shuffle-seed", type=int, default=0)
     parser.add_argument("--hot-documents", type=int, default=2)
     parser.add_argument("--hot-request-ratio", type=float, default=0.7)
@@ -130,19 +134,85 @@ def make_prompt(doc_id, args, ids, warmup, query_variant=0):
     return document + query
 
 
+def record_step_metrics(llm, num_tokens, step_time):
+    if num_tokens > 0:
+        llm.step_metrics["prefill_step_count"] += 1
+        llm.step_metrics["prefill_step_time_sec"] += step_time
+        llm.step_metrics["prefill_token_count_timed"] += num_tokens
+    else:
+        llm.step_metrics["decode_step_count"] += 1
+        llm.step_metrics["decode_step_time_sec"] += step_time
+        llm.step_metrics["decode_token_count_timed"] += -num_tokens
+
+
 def run_round(llm, prompts, sampling_params, use_tqdm):
     before = len(llm.request_latencies)
     round_start = time.perf_counter()
     llm.generate(prompts, [sampling_params] * len(prompts), use_tqdm=use_tqdm)
     elapsed = time.perf_counter() - round_start
-    return elapsed, llm.request_latencies[before:]
+    return elapsed, llm.request_latencies[before:], None
+
+
+def poisson_arrival_offsets(num_requests, request_rate, seed):
+    if request_rate is None or request_rate <= 0:
+        raise ValueError("--request-rate must be positive when --arrival-mode=poisson")
+    rng = random.Random(seed)
+    offsets = []
+    t = 0.0
+    for i in range(num_requests):
+        if i > 0:
+            t += rng.expovariate(request_rate)
+        offsets.append(t)
+    return offsets
+
+
+def run_poisson_round(llm, prompts, sampling_params, request_rate, seed):
+    before = len(llm.request_latencies)
+    arrival_offsets = poisson_arrival_offsets(len(prompts), request_rate, seed)
+    round_start = time.perf_counter()
+    next_request = 0
+    finished = 0
+
+    while finished < len(prompts):
+        now = time.perf_counter()
+        while next_request < len(prompts) and round_start + arrival_offsets[next_request] <= now:
+            seq = llm.add_request(prompts[next_request], sampling_params)
+            # Latency uses the planned client arrival time. If the engine is inside a long CUDA step,
+            # requests that arrive during that step are charged queueing from their true arrival time.
+            llm.request_start_times[seq.seq_id] = round_start + arrival_offsets[next_request]
+            next_request += 1
+
+        if llm.is_finished():
+            if next_request < len(prompts):
+                sleep_until = round_start + arrival_offsets[next_request]
+                time.sleep(max(0.0, sleep_until - time.perf_counter()))
+                continue
+            break
+
+        step_start = time.perf_counter()
+        output, num_tokens = llm.step()
+        record_step_metrics(llm, num_tokens, time.perf_counter() - step_start)
+        for seq_id, _token_ids in output:
+            finished += 1
+            llm.request_latencies.append(time.perf_counter() - llm.request_start_times.pop(seq_id, step_start))
+
+    elapsed = time.perf_counter() - round_start
+    metadata = {
+        "arrival_offsets_sec": arrival_offsets,
+        "planned_arrival_span_sec": arrival_offsets[-1] if arrival_offsets else 0.0,
+        "request_rate_target": request_rate,
+        "request_rate_actual": len(prompts) / elapsed if elapsed else 0.0,
+    }
+    return elapsed, llm.request_latencies[before:], metadata
 
 
 def summarize_latencies(latencies):
     if not latencies:
-        return {"avg": 0.0, "min": 0.0, "max": 0.0}
+        return {"count": 0, "avg": 0.0, "median": 0.0, "min": 0.0, "max": 0.0}
     return {
+        "count": len(latencies),
         "avg": sum(latencies) / len(latencies),
+        "median": statistics.median(latencies),
         "min": min(latencies),
         "max": max(latencies),
     }
@@ -208,9 +278,14 @@ def main():
     )
 
     llm.generate([[ids[1]]], SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1), use_tqdm=False)
-    warmup_elapsed, warmup_latencies = run_round(llm, warmup_prompts, sampling_params, args.use_tqdm)
+    warmup_elapsed, warmup_latencies, _ = run_round(llm, warmup_prompts, sampling_params, args.use_tqdm)
     llm.reset_metrics()
-    query_elapsed, query_latencies = run_round(llm, measured_prompts, sampling_params, args.use_tqdm)
+    if args.arrival_mode == "poisson":
+        query_elapsed, query_latencies, arrival_metadata = run_poisson_round(
+            llm, measured_prompts, sampling_params, args.request_rate, args.arrival_seed
+        )
+    else:
+        query_elapsed, query_latencies, arrival_metadata = run_round(llm, measured_prompts, sampling_params, args.use_tqdm)
     metrics = llm.get_metrics()
     llm.exit()
 
@@ -234,6 +309,9 @@ def main():
         "workload": args.workload,
         "repeat_mode": args.repeat_mode,
         "repeat_count": args.repeat_count,
+        "arrival_mode": args.arrival_mode,
+        "request_rate_target": args.request_rate,
+        "arrival_seed": args.arrival_seed,
         "hot_documents": args.hot_documents,
         "hot_request_ratio": args.hot_request_ratio,
         "measured_doc_ids": measured_doc_ids,
@@ -252,12 +330,17 @@ def main():
         "gpu_kv_cache_gb_actual": gpu_cache_gb_actual,
         "num_kvcache_blocks": num_kvcache_blocks,
         "blocks_per_prompt": blocks_per_prompt,
+        "max_num_seqs": args.max_num_seqs,
+        "max_num_batched_tokens": max_num_batched_tokens,
         "warmup_requests": len(warmup_prompts),
         "warmup_elapsed_sec": warmup_elapsed,
         "warmup_latency_sec": summarize_latencies(warmup_latencies),
         "query_requests": len(measured_prompts),
         "query_elapsed_sec": query_elapsed,
         "query_latency_sec": summarize_latencies(query_latencies),
+        "arrival_metadata": arrival_metadata or {},
+        "planned_arrival_span_sec": (arrival_metadata or {}).get("planned_arrival_span_sec", 0.0),
+        "request_rate_actual": (arrival_metadata or {}).get("request_rate_actual", len(measured_prompts) / query_elapsed if query_elapsed else 0.0),
         "total_document_tokens": total_document_tokens,
         "document_recomputed_tokens_est": document_recomputed_tokens_est,
     }
