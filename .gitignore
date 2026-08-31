@@ -148,6 +148,7 @@ venv.bak/
 # Keep compact summaries and figures under exp/ for reproducible reports.
 # Ignore superseded experiment reports that are no longer referenced.
 /exp/smoke_*/
+/exp/*smoke_*/
 /exp/doclen_sweep_v1_vs_recompute_20260829_113423/
 /exp/doclen_sweep_v1_vs_recompute_20260830_092132/
 /exp/doclen_sweep_v1_vs_recompute_queue_20260830_100635/
@@ -156,6 +157,7 @@ venv.bak/
 /exp/prefix_cache_v1_vs_recompute_*/
 /exp/**/baseline_run*.json
 /exp/**/v1_run*.json
+/exp/**/v2_run*.json
 /exp/**/*.log
 /exp/**/*.pt
 /exp/**/*.pth

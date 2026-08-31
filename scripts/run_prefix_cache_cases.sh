@@ -20,6 +20,7 @@ MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
 PREFILL_BATCH_MULT="${PREFILL_BATCH_MULT:-4}"
 REQUEST_RATE="${REQUEST_RATE:-2.0}"
 RUN_BRANCHING="${RUN_BRANCHING:-0}"
+MODES="${MODES:-baseline v1 v2}"
 ROOT_LEN="${ROOT_LEN:-$((DOC_LEN / 2))}"
 BRANCH_LEN="${BRANCH_LEN:-$((DOC_LEN - ROOT_LEN))}"
 PROMPT_LEN="$((DOC_LEN + QUERY_LEN))"
@@ -49,9 +50,11 @@ run_once() {
   local request_rate="$7"
   shift 7
   local output="$case_dir/${mode}_run${run_id}.json"
-  local offload_flag="--no-enable-cpu-kv-offload"
+  local offload_args=(--no-enable-cpu-kv-offload --enable-gpu-lru-retention)
   if [[ "$mode" == "v1" ]]; then
-    offload_flag="--enable-cpu-kv-offload"
+    offload_args=(--enable-cpu-kv-offload --no-enable-gpu-lru-retention)
+  elif [[ "$mode" == "v2" ]]; then
+    offload_args=(--enable-cpu-kv-offload --enable-gpu-lru-retention)
   fi
   local arrival_args=(--arrival-mode "$arrival_mode" --arrival-seed "$run_id")
   if [[ "$arrival_mode" == "poisson" ]]; then
@@ -63,7 +66,7 @@ run_once() {
     --max-num-seqs "$max_num_seqs" \
     --max-num-batched-tokens "$max_num_batched_tokens" \
     "${arrival_args[@]}" \
-    "$offload_flag" "$@" | tee "$output"
+    "${offload_args[@]}" "$@" | tee "$output"
 }
 
 summarize_case() {
@@ -105,7 +108,16 @@ keys = [
     "decode_step_time_avg_sec",
     "decode_timed_tokens",
     "prefix_cache_reused_token_count",
+    "gpu_prefix_miss_request_count",
     "cpu_prefix_cache_restored_token_count",
+    "cpu_sync_swapin_request_count",
+    "cpu_sync_swapin_block_count",
+    "cpu_sync_swapin_token_count",
+    "gpu_lru_hit_block_count",
+    "gpu_lru_hit_token_count",
+    "gpu_lru_eviction_count",
+    "gpu_lru_cached_block_count",
+    "gpu_lru_cached_block_peak",
     "document_recomputed_tokens_est",
     "cpu_prefix_d2h_bytes",
     "cpu_prefix_h2d_bytes",
@@ -122,9 +134,13 @@ keys = [
     "prefill_model_runner_count",
     "max_num_seqs",
     "max_num_batched_tokens",
+    "working_set_to_gpu_kv_ratio",
+    "single_prompt_kv_gb_est",
+    "single_prompt_to_gpu_kv_ratio",
+    "single_prompt_fit_count_est",
 ]
 summary = {"case": case_dir.name, "modes": {}}
-for mode in ("baseline", "v1"):
+for mode in ("baseline", "v1", "v2"):
     rows = []
     for path in sorted(case_dir.glob(f"{mode}_run*.json")):
         rows.append(json.loads(path.read_text()))
@@ -145,22 +161,35 @@ for mode in ("baseline", "v1"):
         mode_summary[key] = rows[0].get(key)
     summary["modes"][mode] = mode_summary
 
-base = summary["modes"].get("baseline")
-v1 = summary["modes"].get("v1")
-if base and v1:
-    def mean(mode, key):
-        return summary["modes"][mode][key]["mean"]
-    summary["comparison"] = {
-        "query_elapsed_speedup_v1_over_baseline": mean("baseline", "query_elapsed_sec") / mean("v1", "query_elapsed_sec") if mean("v1", "query_elapsed_sec") else 0,
-        "request_latency_median_speedup_v1_over_baseline": mean("baseline", "request_latency_median") / mean("v1", "request_latency_median") if mean("v1", "request_latency_median") else 0,
-        "ttft_median_speedup_v1_over_baseline": mean("baseline", "ttft_latency_median") / mean("v1", "ttft_latency_median") if mean("v1", "ttft_latency_median") else 0,
-        "queueing_avg_speedup_v1_over_baseline": mean("baseline", "queueing_latency_avg") / mean("v1", "queueing_latency_avg") if mean("v1", "queueing_latency_avg") else 0,
-        "queueing_max_speedup_v1_over_baseline": mean("baseline", "queueing_latency_max") / mean("v1", "queueing_latency_max") if mean("v1", "queueing_latency_max") else 0,
-        "prefill_time_speedup_v1_over_baseline": mean("baseline", "prefill_step_time_sec") / mean("v1", "prefill_step_time_sec") if mean("v1", "prefill_step_time_sec") else 0,
-        "decode_time_speedup_v1_over_baseline": mean("baseline", "decode_step_time_sec") / mean("v1", "decode_step_time_sec") if mean("v1", "decode_step_time_sec") else 0,
-        "baseline_recomputed_tokens_mean": mean("baseline", "document_recomputed_tokens_est"),
-        "v1_restored_tokens_mean": mean("v1", "cpu_prefix_cache_restored_token_count"),
-    }
+def mean(mode, key):
+    return summary["modes"][mode][key]["mean"]
+
+def add_speedups(dst, lhs, rhs, label):
+    if lhs not in summary["modes"] or rhs not in summary["modes"]:
+        return
+    for out_key, metric in (
+        ("query_elapsed_speedup", "query_elapsed_sec"),
+        ("request_latency_median_speedup", "request_latency_median"),
+        ("ttft_median_speedup", "ttft_latency_median"),
+        ("queueing_avg_speedup", "queueing_latency_avg"),
+        ("queueing_max_speedup", "queueing_latency_max"),
+        ("prefill_time_speedup", "prefill_step_time_sec"),
+        ("decode_time_speedup", "decode_step_time_sec"),
+    ):
+        denom = mean(lhs, metric)
+        dst[f"{out_key}_{label}"] = mean(rhs, metric) / denom if denom else 0
+
+summary["comparison"] = {}
+add_speedups(summary["comparison"], "v1", "baseline", "v1_over_baseline")
+add_speedups(summary["comparison"], "v2", "baseline", "v2_over_baseline")
+add_speedups(summary["comparison"], "v2", "v1", "v2_over_v1")
+if "baseline" in summary["modes"]:
+    summary["comparison"]["baseline_recomputed_tokens_mean"] = mean("baseline", "document_recomputed_tokens_est")
+if "v1" in summary["modes"]:
+    summary["comparison"]["v1_restored_tokens_mean"] = mean("v1", "cpu_prefix_cache_restored_token_count")
+if "v2" in summary["modes"]:
+    summary["comparison"]["v2_restored_tokens_mean"] = mean("v2", "cpu_prefix_cache_restored_token_count")
+    summary["comparison"]["v2_gpu_lru_hit_tokens_mean"] = mean("v2", "gpu_lru_hit_token_count")
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY_SUMMARY
   echo "[$(date '+%F %T')] wrote $case_dir/summary.json"
@@ -176,8 +205,9 @@ run_case() {
   local case_dir="$EXP_DIR/$name"
   mkdir -p "$case_dir"
   for run_id in $(seq 1 "$RUNS"); do
-    run_once "$case_dir" baseline "$run_id" "$max_num_seqs" "$max_num_batched_tokens" "$arrival_mode" "$request_rate" "$@"
-    run_once "$case_dir" v1 "$run_id" "$max_num_seqs" "$max_num_batched_tokens" "$arrival_mode" "$request_rate" "$@"
+    for mode in $MODES; do
+      run_once "$case_dir" "$mode" "$run_id" "$max_num_seqs" "$max_num_batched_tokens" "$arrival_mode" "$request_rate" "$@"
+    done
   done
   summarize_case "$case_dir"
 }
