@@ -215,6 +215,16 @@ V2       = CPU offload + inactive GPU LRU retention；优先 GPU LRU hit，miss 
 
 核心结果均为 3 次运行均值。`prefill total` 是 measured 阶段所有 prefill step 的总 wall time；`prefill avg/step` 是单个 prefill step 平均值；`TTFT/request/queueing` 是 measured requests 的分布统计。
 
+图表：
+
+![V1 vs baseline latency speedup](exp/v2_lru_vs_recompute_20260831_193542/figures/v1_vs_baseline_latency_speedup.svg)
+
+![V1 vs baseline token accounting](exp/v2_lru_vs_recompute_20260831_193542/figures/v1_vs_baseline_tokens.svg)
+
+![V2 vs V1 latency speedup](exp/v2_lru_vs_recompute_20260831_193542/figures/v2_vs_v1_latency_speedup.svg)
+
+![V2 vs V1 swapin and LRU hits](exp/v2_lru_vs_recompute_20260831_193542/figures/v2_vs_v1_swapin_lru_tokens.svg)
+
 | case | mode | docs | reqs | prefill total | prefill avg/step | TTFT median/min/max | request median | queue avg/max | recompute tokens | sync swapin req/tokens | GPU LRU hit tokens |
 |---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
 | case0 | baseline | 1 | 1 | 0.048s | 0.048s | 0.075/0.075/0.075s | 0.448s | 0.0000/0.000s | 0 | 0/0 | 4096 |
@@ -245,119 +255,6 @@ V2       = CPU offload + inactive GPU LRU retention；优先 GPU LRU hit，miss 
 - `branching` 中存在大量 root/branch 部分共享。V2 恢复了 baseline 级别的 GPU reuse，并把 V1 的同步 swapin 从 `80` 次降到 `20` 次，swapin tokens 降低 `86.8%`。
 - queueing latency 这轮整体较低，说明当前配置基本对齐 serving-style Poisson arrival，而不是旧版一次性批量提交造成的大排队。
 - request median/TTFT 的提升比 prefill total 小：输出 decode 仍占 request latency 大头，且 V2 当前没有做 H2D overlap/prefetch，只是减少同步 restore 的次数。
-
-### 旧版 Poisson Serving Benchmark
-
-本轮结果暂标记为旧版 sanity，不作为 V2 LRU 主实验结论。结果目录：
-
-```text
-exp/doclen_sweep_maincases_20260831_085500/
-```
-
-这轮已经改成 `document_length >= 4096`，并去掉 branching，measured 阶段使用 Poisson arrival，主 case 使用 `max_num_seqs=8` 和 continuous batching。但它的 GPU KV capacity 仍沿用 V1 压力测试配置，`single_prompt_KV / GPU_KV` 偏高，尤其 6144/7680 场景会限制实际 batching 和 inactive cache retention 空间。因此它适合证明“CPU restore 替代 recompute”，不适合证明“LRU retention 减少 swapin”。
-
-配置：
-
-```text
-model = /data/datasets/models-hf/Qwen3-8B
-runs = 3
-document_length = 4096 / 6144 / 7680
-query_length = 96
-output_len = 16
-target_working_set_gb = 1.5
-gpu_kv_cache_gb = 1.1
-request_rate = 1.0 req/s
-main max_num_seqs = 8
-main max_num_batched_tokens = 4 * (document_length + query_length)
-```
-
-指标口径：`request_latency_*`、`ttft_latency_*`、`queueing_latency_*` 都是 measured request 的分布统计；`prefill_step_time_sec` 是 measured 阶段所有 prefill step 的总 wall time，用来衡量系统 prefill 工作量，不是单请求 latency。旧版指标还缺少 V2 需要的同步 swapin request/block 计数和 LRU hit/eviction 计数。
-
-图表：
-
-![Speedups](exp/doclen_sweep_maincases_20260831_085500/figures/doclen_speedups.svg)
-
-![Prefill step time](exp/doclen_sweep_maincases_20260831_085500/figures/prefill_time_baseline_vs_v1.svg)
-
-![Median TTFT](exp/doclen_sweep_maincases_20260831_085500/figures/ttft_median_baseline_vs_v1.svg)
-
-![Median request latency](exp/doclen_sweep_maincases_20260831_085500/figures/request_latency_median_baseline_vs_v1.svg)
-
-![Queueing max](exp/doclen_sweep_maincases_20260831_085500/figures/queueing_max_baseline_vs_v1.svg)
-
-![Token accounting](exp/doclen_sweep_maincases_20260831_085500/figures/tokens_recompute_restore_reuse.svg)
-
-核心结果均为 3 次运行均值：
-
-| doc len | case | reqs | GPU reuse B/V1 | recompute -> restore | prefill total B/V1 | TTFT median B/V1 | TTFT min B/V1 | request median B/V1 | queue avg B/V1 | queue max B/V1 |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4096 | case0 | 1 | 4096 / 4096 | 0 -> 0 | 0.048 / 0.048 s | 0.076 / 0.075 s | 0.076 / 0.075 s | 0.452 / 0.453 s | 0.00003 / 0.00003 s | 0.00003 / 0.00003 s |
-| 4096 | cascade | 3 | 0 / 0 | 12288 -> 12288 | 0.355 / 0.173 s | 0.147 / 0.105 s | 0.145 / 0.082 s | 0.514 / 0.539 s | 0.068 / 0.064 s | 0.204 / 0.192 s |
-| 4096 | hot/cold | 12 | 29184 / 29184 | 19968 -> 19968 | 0.784 / 0.554 s | 0.111 / 0.087 s | 0.063 / 0.070 s | 0.488 / 0.546 s | 0.147 / 0.163 s | 0.852 / 0.977 s |
-| 6144 | case0 | 1 | 6144 / 6144 | 0 -> 0 | 0.054 / 0.049 s | 0.083 / 0.076 s | 0.083 / 0.076 s | 0.493 / 0.450 s | 0.00003 / 0.00003 s | 0.00003 / 0.00003 s |
-| 6144 | cascade | 2 | 3072 / 3072 | 9216 -> 9216 | 0.299 / 0.110 s | 0.291 / 0.168 s | 0.179 / 0.086 s | 0.661 / 0.542 s | 0.115 / 0.086 s | 0.229 / 0.172 s |
-| 6144 | hot/cold | 8 | 29696 / 29696 | 19456 -> 19456 | 0.774 / 0.377 s | 0.183 / 0.089 s | 0.065 / 0.065 s | 0.577 / 0.526 s | 0.096 / 0.085 s | 0.568 / 0.519 s |
-| 7680 | case0 | 1 | 7680 / 7680 | 0 -> 0 | 0.055 / 0.054 s | 0.085 / 0.084 s | 0.085 / 0.084 s | 0.509 / 0.475 s | 0.00004 / 0.00003 s | 0.00004 / 0.00003 s |
-| 7680 | cascade | 2 | 0 / 0 | 15360 -> 15360 | 0.481 / 0.127 s | 0.414 / 0.178 s | 0.268 / 0.094 s | 0.800 / 0.547 s | 0.145 / 0.088 s | 0.290 / 0.176 s |
-| 7680 | hot/cold | 8 | 30720 / 30720 | 30720 -> 30720 | 1.122 / 0.398 s | 0.280 / 0.092 s | 0.064 / 0.065 s | 0.649 / 0.514 s | 0.156 / 0.133 s | 0.743 / 0.657 s |
-
-Speedup：
-
-| doc len | case | prefill total | TTFT median | request median | queue avg | queue max |
-|---:|---|---:|---:|---:|---:|---:|
-| 4096 | cascade | 2.05x | 1.40x | 0.95x | 1.06x | 1.06x |
-| 4096 | hot/cold | 1.42x | 1.27x | 0.89x | 0.90x | 0.87x |
-| 6144 | cascade | 2.73x | 1.74x | 1.22x | 1.33x | 1.33x |
-| 6144 | hot/cold | 2.06x | 2.06x | 1.10x | 1.13x | 1.09x |
-| 7680 | cascade | 3.80x | 2.33x | 1.46x | 1.64x | 1.64x |
-| 7680 | hot/cold | 2.82x | 3.03x | 1.26x | 1.17x | 1.13x |
-
-观察：
-
-- `case0` 只验证 GPU prefix hit 链路，baseline 和 V1 基本一致，不用于展示 CPU restore 收益。
-- `cascade` 是容量压力最强的 case：4096/7680 下 GPU reuse 为 0，6144 下只残留 3072 token；V1 能把 baseline 的 recompute token 转成 CPU restore。
-- `hot/cold` 同时存在 GPU reuse 和 GPU miss；baseline 与 V1 的 GPU reuse token 一致，说明 V1 没有牺牲原有 GPU prefix cache，只是在 miss 时补 CPU restore。
-- 这组参数的主要问题是 `single_prompt_KV / GPU_KV` 偏高。虽然 `working_set / GPU_KV = 1.5 / 1.1 = 1.36x` 不算极端，但 6144/7680 下单个 prompt 已接近或占满 GPU KV cache，实际 continuous batching 和 inactive LRU retention 空间不足。
-- prefix 越长，V1 的 prefill total 改善越明显；TTFT/request latency 的改善较小，因为它们还包含排队、query suffix prefill、first-token decode 和后续 decode。
-- Poisson arrival 下 median queue 很低，但 max queue 会被局部 burst 放大，因此文档里保留 avg/max 而不把单次 tail 当稳定结论。
-
-### Restore Profile 与带宽检查
-
-Profile 目录：
-
-```text
-exp/profile_v1_restore_20260830/
-```
-
-`document_length = 6144`、`cascade_tile`、`repeat_count = 1` 的拆分：
-
-| mode | restore H2D | scheduler total | model CUDA prefill | model runner prefill wall | prefill step | request median | TTFT median |
-|---|---:|---:|---:|---:|---:|---:|---:|
-| baseline | 0.000 s | 0.002 s | 0.552 s | 0.556 s | 0.557 s | 1.226 s | 0.828 s |
-| V1 | 0.054 s | 0.065 s | 0.110 s | 0.112 s | 0.167 s | 0.937 s | 0.551 s |
-
-V1 的 `restore_latency_sum = 0.054s` 只统计 KV H2D copy；`prefill_step_time = 0.167s` 还包含 restore 后的 96-token query suffix forward。剩余约 0.11s 主要是 GPU prefill attention，不是 CPU 处理开销。
-
-本机 host-device pinned copy 带宽：
-
-| size | H2D avg / median | D2H avg / median |
-|---:|---:|---:|
-| 64 MiB | 14.03 / 14.05 GB/s | 48.12 / 48.08 GB/s |
-| 256 MiB | 19.83 / 19.76 GB/s | 41.31 / 41.30 GB/s |
-| 1024 MiB | 38.62 / 38.90 GB/s | 33.69 / 33.69 GB/s |
-| 2048 MiB | 49.49 / 49.59 GB/s | 31.89 / 31.88 GB/s |
-
-`nvidia-smi topo -m` 显示 GPU 到 CPU 是 `NODE` 路径，不是 NVLink。V1 restore 读 2.72 GB 用 0.054s，折算约 50.6 GB/s，和大块 H2D 带宽测试吻合。
-
-### 旧版 Sanity 结果
-
-旧实验目录：
-
-```text
-exp/doclen_sweep_v1_vs_recompute_queue_20260830_100635/
-```
-
-这组实验使用一次性批量提交，并且 `max_num_seqs=1`，会人为制造很重的排队时间。现在只保留为 sanity：它证明了 prefix 越长，V1 把 recompute 转成 restore 后 prefill 路径收益越明显；但不再作为主 serving benchmark 结论。
 
 ## 下一步
 
