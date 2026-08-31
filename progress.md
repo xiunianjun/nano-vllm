@@ -1,40 +1,24 @@
 # nano-vLLM GPU+CPU Prefix Cache 进展
 
-## 当前研究方向
+## 研究方向
 
-当前主线：
+目标：把 nano-vLLM 现有 GPU prefix cache 扩展为 GPU + CPU 两级 prefix cache。
 
-```text
-将 nano-vLLM 现有 GPU prefix cache 扩展为 GPU + CPU 两级 prefix cache。
-```
-
-研究场景：
-
-- 模型权重始终完整驻留 GPU。
-- 只人为限制 GPU KV Cache capacity。
-- 请求之间存在可复用 prefix。
-- GPU prefix cache miss 时，未来目标是优先从 CPU prefix cache restore KV，而不是重新 prefill。
-
-重要判断：
+请求查找 prefix KV 时：
 
 ```text
-nano-vLLM 当前不是 layer-wise page abstraction。
+GPU hit              -> 直接复用 GPU KV
+GPU miss + CPU hit   -> H2D restore 到 GPU，跳过 prefix prefill
+GPU miss + CPU miss  -> 正常 prefill / recompute
 ```
 
-它的 `BlockManager` 管理的是 logical block/page。一个 logical block id 同时对应所有 layer 的 K/V slice：
+约束：模型权重始终完整驻留 GPU，只人为限制 GPU KV cache capacity；第一阶段不考虑 SSD、不引入 ShareGPT、不把 preemption-driven swapping 作为主实验。
+
+实现上需要贴合 nano-vLLM 当前 block 抽象：`BlockManager` 管理的是 logical block，一个 logical block id 对应所有 layer 的 K/V slice。
 
 ```text
 kv_cache shape = [K/V][layer][block_id][token_offset][kv_head][head_dim]
-```
-
-因此不能直接照搬 LMCache 的 layer-wise KV page 管理策略。LMCache Long-Document QA 仍然可作为 workload 语义参考，但 CPU cache / eviction / restore 的实现必须贴合 nano-vLLM 当前的 logical block 设计。
-
-对 Qwen3-8B：
-
-```text
-1 logical block = 256 tokens 的全层 KV
-1 logical block = 36 MiB
-1 layer 内的 block slice = 1 MiB
+Qwen3-8B: 1 logical block = 256 tokens = 36 MiB 全层 KV
 ```
 
 ## 环境
@@ -48,382 +32,164 @@ Torch: 2.8.0+cu128
 FlashAttention: 2.8.3.post1
 ```
 
-说明：`.venv-fa28` 中已有匹配的 `flash-attn` wheel，后续 benchmark 优先使用该环境，避免本地编译 `flash-attn` 把服务器资源打满。
+说明：`.venv-fa28` 中已有匹配的 `flash-attn` wheel，后续 benchmark 优先使用该环境，避免本地编译。
 
-## Benchmark 入口
+## 代码入口
 
-主 benchmark 脚本：
-
-```bash
+```text
 bench_long_doc_qa.py
-```
-
-统一 case runner：
-
-```bash
 scripts/run_prefix_cache_cases.sh
 ```
 
-运行方式：
+`bench_long_doc_qa.py` 负责生成 synthetic long-doc / branching workload，并输出 JSON metrics。`scripts/run_prefix_cache_cases.sh` 负责批量跑 baseline 与 V1，并为每个 case 生成 `summary.json`。
 
-```bash
-GPU=1 VENV=.venv-fa28 OUT_DIR=results/prefix_cache_cases/latest_smoke \
-  scripts/run_prefix_cache_cases.sh
-```
+## V1 实现
 
-结果会保存到：
+V1 已实现 CPU prefix cache backing store，重点是 correctness 和可观测性，暂不做 scheduler-aware prefetch / OPT eviction。
 
-```text
-results/prefix_cache_cases/<run_name>/
-```
+核心路径：
 
-## Workload 语义
+- prompt prefill 完成后，完整 prefix blocks 立刻 async D2H 写回 CPU。
+- decode 新生成 tokens 暂不主动纳入 prefix cache；后续请求重新 prefill 成完整 block 后再进入 cache。
+- 写回前用 block hash + token ids 去重：CPU 已有或正在 pending writeback 时跳过。
+- waiting request 调度时查最长连续 prefix：GPU hit 直接复用，CPU hit 分配 GPU block 并同步 H2D restore，miss 后剩余 token 正常 prefill。
+- pending writeback 的 GPU block 会被保护，D2H 完成后再释放；V1 选择优先保证正确性。
 
-参考 LMCache Long-Document QA benchmark 的 workload 语义，但不照搬其 KV cache 实现。
+已验证 smoke test：
 
-核心语义：
+| 场景 | 结果 |
+|---|---|
+| 重复 prompt 写回 | 第二次请求不会重复 D2H，同一 prefix block 写回去重生效 |
+| `D0 -> D1 -> D0` 小 GPU cache | 第三次 `D0` GPU miss + CPU hit，可 H2D restore 并跳过 prefix prefill |
 
-- warmup 阶段先访问所有 reusable prefixes，不计入最终指标。
-- measured query 阶段再次访问相同 prefix，但使用不同 query suffix。
-- same document / same branch 需要保证 prefix token 完全一致。
-- query suffix 不同，用于模拟同一文档或同一分支上的不同问题。
+## Workload Cases
 
-当前不使用 ShareGPT，不引入真实长文档数据集。文档和 branch 都用 synthetic token IDs 生成。
+当前参考 LMCache Long-Document QA 的 workload 语义，但文档内容使用 synthetic token IDs。warmup 阶段访问所有 reusable prefixes，不计入最终指标；measured 阶段访问相同 prefix + 不同 query suffix。
 
-## 当前 V1 实现
+| case | 目的 | 访问特征 |
+|---|---|---|
+| `case0_functional` | 单文档功能性校验 | 同一 document 做两次 QA，第二次应命中 GPU prefix cache |
+| `cascade_tile` | 级联污染 / cache thrashing sanity | warmup `D0,D1,...`，query 再从 `D0` 开始；working set 大于 GPU cache 时容易连续 miss |
+| `hot_cold_sharing` | 冷热 document prefix sharing | hot documents 高频访问，cold documents 低频访问；同时出现 GPU hit 和 GPU miss |
 
-### 目标
+## 实验结果
 
-V1 已经从旧的 request-level preemption swapping，调整为当前主线需要的 **CPU prefix cache backing store**：
+### Poisson Serving Benchmark
 
-```text
-GPU prefix hit
--> 直接复用 GPU KV
-
-GPU miss + CPU prefix hit
--> 同步 H2D restore 到 GPU KV block
--> 跳过对应 prefix prefill
-
-GPU miss + CPU miss
--> 正常 prefill / recompute
-```
-
-当前 V1 不做复杂 scheduler-aware prefetch，也不做 OPT eviction。重点是先保证 GPU+CPU 两级 prefix cache 的状态和 benchmark 语义正确。
-
-### Prefix 写回时机
+本轮主结果目录：
 
 ```text
-request prompt prefill 完成
--> 已形成完整 block hash 的 prefix blocks 立刻启动 async D2H writeback
--> request 继续进入 decode
+exp/doclen_sweep_maincases_20260831_085500/
 ```
 
-这样可以覆盖一种重要情况：request prefill 完后进入 decode，如果 decode 阶段又因为显存压力被抢占，它的 prompt prefix 已经有机会在 CPU 上留下 backing copy。
+这轮替换旧的短 prefix / branching 扫描：默认只跑 `document_length >= 4096`，主流程只保留 `case0_functional`、`cascade_tile`、`hot_cold_sharing`。measured 阶段使用 Poisson arrival，主 case 使用 `max_num_seqs=8` 和 continuous batching。
 
-decode 新生成的 tokens 当前 **不主动纳入 prefix cache**。这点和 vLLM 的策略更接近：
-
-```text
-prompt prefill prefix -> 可以进入 prefix cache
-new decode tokens -> 先不进入 prefix cache
-后续请求重新 prefill 形成完整 block 后 -> 再纳入 prefix cache
-```
-
-### 写回去重
-
-V1 写回前会做去重，避免重复 D2H：
-
-```text
-CPU 已经有相同 prefix block
--> skip writeback
-
-相同 prefix block 正在 pending writeback
--> skip writeback
-
-CPU 没有且 pending 也没有
--> 发起 async D2H writeback
-```
-
-当前去重依据是 block hash + token_ids 校验：
-
-- `BlockManager.cpu_hash_to_token_ids` 保存 CPU prefix cache 的元数据。
-- `Scheduler._pending_writeback_hashes()` 保存正在写回的 prefix hash。
-- `ModelRunner.cpu_prefix_cache` 保存真正的 CPU KV tensor。
-
-### Pending / Protected Block
-
-异步写回通过独立 CUDA copy stream 发起：
-
-```text
-copy_stream:
-  cpu_block.copy_(gpu_block, non_blocking=True)
-  done_event.record()
-```
-
-Python 侧没有使用回调，而是由 scheduler 轮询 CUDA event：
-
-```text
-done_event.query()       # 非阻塞检查
-done_event.synchronize() # 必要时阻塞等待
-```
-
-写回未完成前，对应 GPU block 处于 protected 状态，不能回到 free list。否则新的 request 可能覆盖这个 block，导致 CPU copy 读到错误 KV。
-
-当前状态由几处结构共同表达：
-
-- GPU resident: `BlockManager.hash_to_block_id`
-- CPU resident: `BlockManager.cpu_hash_to_token_ids` + `ModelRunner.cpu_prefix_cache`
-- writeback pending: `Scheduler.pending_prefix_writebacks`
-- per-request writeback started: `Sequence.prefix_writeback_started`
-
-### Request 读入
-
-调度 waiting request 时，`BlockManager.get_allocate_plan()` 查找从 prompt 开头开始的最长连续 prefix：
-
-```text
-1. GPU hit: 直接引用已有 GPU block
-2. CPU hit: 分配新的 GPU block，加入 restore_entries
-3. miss: 停止 prefix lookup，剩余 token 正常 prefill
-```
-
-如果存在 `restore_entries`，scheduler 会调用 `ModelRunner.restore_prefix_blocks()` 做同步 H2D restore。restore 完成后，才继续 prefill 剩余 query suffix。
-
-### 抢占语义
-
-当前 preemption 不是主实验路径，只保留作 sanity。开启 CPU prefix offload 时，抢占会处理 pending writeback 的保护：
-
-```text
-request 被抢占
--> 如果某些 blocks 正在 D2H writeback，标记 release_on_complete
--> 释放其他 blocks
--> pending blocks 等 D2H 完成后再释放
-```
-
-因此不会强制释放正在写回的 block。若写回较慢并导致显存暂时不足，V1 选择等待 pending writeback 完成，优先保证正确性。
-
-`recompute_pending_tokens` 在 CPU prefix offload 场景下按 V1 invariant 简化：完整 prefix blocks 已经在 CPU 上或正在 pending writeback，不计入 recompute；只有 decode 阶段最后一个未满 block 计入。
-
-之前考虑过逐 block 检查 CPU backing / pending 状态。那种写法能覆盖 chunked prefill 未完成、hash 状态异常、后续 eviction/prefetch 引入不一致等复杂情况，但当前 V1 先保持更清晰的语义：prefill 完立即写回完整 prefix block，decode 新 tokens 暂不纳入 prefix cache。
-
-### 已验证 Smoke Test
-
-#### 重复 prompt 去重
-
-同一个 prompt 连续请求两次，第二次不再重复写回同一个 prefix block：
-
-```text
-cpu_prefix_writeback_count = 1
-cpu_prefix_d2h_bytes = 29360128
-```
-
-说明 CPU 已有 backing copy 时，写回前去重生效。
-
-#### CPU restore
-
-使用小 GPU cache 跑：
-
-```text
-D0 -> D1 -> D0
-```
-
-第三次 `D0` 发生 GPU miss，但 CPU prefix cache 命中并 restore：
-
-```text
-cpu_prefix_writeback_count = 2
-cpu_prefix_cache_hit_count = 1
-cpu_prefix_restore_count = 1
-cpu_prefix_restored_token_count = 256
-```
-
-说明 GPU miss + CPU hit -> H2D restore -> skip prefix prefill 的路径已经可用。
-
-## 后续 V2 方向
-
-### Scheduler-Aware Prefetch
-
-V2 再做调度协同：调度当前 request 后，如果 GPU KV 还有空间，可以提前把后续请求可能需要的 CPU-resident KV copy 回 GPU。
-
-```text
-current request running
-GPU has spare blocks
-next likely request has CPU KV but no GPU KV
--> async H2D prefetch
-```
-
-### OPT-like Eviction
-
-驱逐时 inspect 当前 benchmark/scheduler 队列，选择未来窗口内最晚再次访问的 prefix block：
-
-```text
-evict block whose next use is farthest in the future
-```
-
-这可以作为研究型 oracle policy，用于评估调度和 cache 协同的收益上界。
-
-### Pending Writeback Backpressure
-
-V1 为了正确性会保护 pending blocks。V2 可以进一步控制这件事：
-
-- 限制 pending writeback 的 block 数或总 bytes。
-- 优先写回 hot prefix。
-- 当显存紧张时优先等待最早完成的 pending copy。
-- 暂不建议强制释放正在 D2H 的 block，除非同时设计安全的 abort/ignore 机制。
-
-## 已实现 Workload Case
-
-### Case 1: cascade_tile
-
-目标：观察 GPU prefix cache 的级联污染 / cache thrashing。
-
-访问模式：
-
-```text
-warmup:  D0, D1, D2, ...
-query:   D0, D1, D2, ...
-```
-
-当 working set 略大于 GPU KV cache 时，第二轮从 `D0` 开始 miss。`D0` 重新 prefill 时分配的新 blocks 会覆盖后续 document 的部分 prefix blocks，导致后续 document 在被访问前也失效，形成连续 miss。
-
-这个 case 可以作为“调度顺序和 cache eviction 不配合”的 worst-case。
-
-### Case 2: hot_cold_sharing
-
-目标：观察正常冷热 document prefix sharing。
-
-访问模式：
-
-```text
-hot documents: 频繁访问
-cold documents: 偶尔访问
-```
-
-请求形态：
-
-```text
-D0 + Q1
-D1 + Q1
-D0 + Q2
-D5 + Q1
-D1 + Q2
-...
-```
-
-这里会同时出现：
-
-- GPU prefix hit；
-- GPU miss 后重新 prefill；
-- hot prefix 比 cold prefix 更容易留在 GPU cache。
-
-### Case 3: branching_prefix_sharing
-
-目标：观察不同 request 之间的部分 prefix sharing。
-
-请求形态：
-
-```text
-RootPrefix + BranchA + Query1
-RootPrefix + BranchA + Query2
-RootPrefix + BranchB + Query1
-RootPrefix + BranchB + Query2
-```
-
-复用层次：
-
-- 不同 branch 之间共享 `RootPrefix`。
-- 同一 branch 下不同 query 共享 `RootPrefix + BranchPrefix`。
-- query suffix 不共享。
-
-这个 case 更接近多请求分叉场景，也更适合后续验证 CPU prefix cache 是否能保存被 GPU 淘汰的中间 prefix。
-
-## 当前 Baseline 配置
-
-三组 case 使用同一基础配置：
+配置：
 
 ```text
 model = /data/datasets/models-hf/Qwen3-8B
-GPU = CUDA_VISIBLE_DEVICES=1
-document_length = 1024
-query_length = 64
-output_len = 8
-target_working_set_gb = 1.0
+runs = 3
+document_length = 4096 / 6144 / 7680
+query_length = 96
+output_len = 16
+target_working_set_gb = 1.5
 gpu_kv_cache_gb = 1.1
-max_num_seqs = 1
-enforce_eager = true
+request_rate = 1.0 req/s
+main max_num_seqs = 8
+main max_num_batched_tokens = 4 * (document_length + query_length)
 ```
 
-实际模型 KV 参数：
+指标口径：`request_latency_*`、`ttft_latency_*`、`queueing_latency_*` 都是 measured request 的分布统计；`prefill_step_time_sec` 是 measured 阶段所有 prefill step 的总 wall time，用来衡量系统 prefill 工作量，不是单请求 latency。
 
-```text
-kv_bytes_per_token = 147456
-gpu_kv_cache_gb_actual = 1.08984375
-num_kvcache_blocks = 31
-block_size = 256
-```
+图表：
 
-## Baseline 结果
+![Speedups](exp/doclen_sweep_maincases_20260831_085500/figures/doclen_speedups.svg)
 
-本轮结果目录：
+![Prefill step time](exp/doclen_sweep_maincases_20260831_085500/figures/prefill_time_baseline_vs_v1.svg)
 
-```text
-results/prefix_cache_cases/latest_smoke/
-```
+![Median TTFT](exp/doclen_sweep_maincases_20260831_085500/figures/ttft_median_baseline_vs_v1.svg)
 
-| case | workload | query requests | prefix reused tokens | estimated recomputed prefix tokens | query elapsed |
-|---|---|---:|---:|---:|---:|
-| cascade_tile | long_doc_qa | 8 | 0 | 8192 | 1.83 s |
-| hot_cold_sharing | long_doc_qa | 32 | 25344 | 7424 | 7.15 s |
-| branching_prefix_sharing | branching_prefix | 56 | 52736 | 4608 | 12.40 s |
+![Median request latency](exp/doclen_sweep_maincases_20260831_085500/figures/request_latency_median_baseline_vs_v1.svg)
+
+![Queueing max](exp/doclen_sweep_maincases_20260831_085500/figures/queueing_max_baseline_vs_v1.svg)
+
+![Token accounting](exp/doclen_sweep_maincases_20260831_085500/figures/tokens_recompute_restore_reuse.svg)
+
+核心结果均为 3 次运行均值：
+
+| doc len | case | reqs | GPU reuse B/V1 | recompute -> restore | prefill total B/V1 | TTFT median B/V1 | TTFT min B/V1 | request median B/V1 | queue avg B/V1 | queue max B/V1 |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4096 | case0 | 1 | 4096 / 4096 | 0 -> 0 | 0.048 / 0.048 s | 0.076 / 0.075 s | 0.076 / 0.075 s | 0.452 / 0.453 s | 0.00003 / 0.00003 s | 0.00003 / 0.00003 s |
+| 4096 | cascade | 3 | 0 / 0 | 12288 -> 12288 | 0.355 / 0.173 s | 0.147 / 0.105 s | 0.145 / 0.082 s | 0.514 / 0.539 s | 0.068 / 0.064 s | 0.204 / 0.192 s |
+| 4096 | hot/cold | 12 | 29184 / 29184 | 19968 -> 19968 | 0.784 / 0.554 s | 0.111 / 0.087 s | 0.063 / 0.070 s | 0.488 / 0.546 s | 0.147 / 0.163 s | 0.852 / 0.977 s |
+| 6144 | case0 | 1 | 6144 / 6144 | 0 -> 0 | 0.054 / 0.049 s | 0.083 / 0.076 s | 0.083 / 0.076 s | 0.493 / 0.450 s | 0.00003 / 0.00003 s | 0.00003 / 0.00003 s |
+| 6144 | cascade | 2 | 3072 / 3072 | 9216 -> 9216 | 0.299 / 0.110 s | 0.291 / 0.168 s | 0.179 / 0.086 s | 0.661 / 0.542 s | 0.115 / 0.086 s | 0.229 / 0.172 s |
+| 6144 | hot/cold | 8 | 29696 / 29696 | 19456 -> 19456 | 0.774 / 0.377 s | 0.183 / 0.089 s | 0.065 / 0.065 s | 0.577 / 0.526 s | 0.096 / 0.085 s | 0.568 / 0.519 s |
+| 7680 | case0 | 1 | 7680 / 7680 | 0 -> 0 | 0.055 / 0.054 s | 0.085 / 0.084 s | 0.085 / 0.084 s | 0.509 / 0.475 s | 0.00004 / 0.00003 s | 0.00004 / 0.00003 s |
+| 7680 | cascade | 2 | 0 / 0 | 15360 -> 15360 | 0.481 / 0.127 s | 0.414 / 0.178 s | 0.268 / 0.094 s | 0.800 / 0.547 s | 0.145 / 0.088 s | 0.290 / 0.176 s |
+| 7680 | hot/cold | 8 | 30720 / 30720 | 30720 -> 30720 | 1.122 / 0.398 s | 0.280 / 0.092 s | 0.064 / 0.065 s | 0.649 / 0.514 s | 0.156 / 0.133 s | 0.743 / 0.657 s |
+
+Speedup：
+
+| doc len | case | prefill total | TTFT median | request median | queue avg | queue max |
+|---:|---|---:|---:|---:|---:|---:|
+| 4096 | cascade | 2.05x | 1.40x | 0.95x | 1.06x | 1.06x |
+| 4096 | hot/cold | 1.42x | 1.27x | 0.89x | 0.90x | 0.87x |
+| 6144 | cascade | 2.73x | 1.74x | 1.22x | 1.33x | 1.33x |
+| 6144 | hot/cold | 2.06x | 2.06x | 1.10x | 1.13x | 1.09x |
+| 7680 | cascade | 3.80x | 2.33x | 1.46x | 1.64x | 1.64x |
+| 7680 | hot/cold | 2.82x | 3.03x | 1.26x | 1.17x | 1.13x |
 
 观察：
 
-- `cascade_tile` 出现全 miss，说明该 case 成功暴露了级联污染。
-- `hot_cold_sharing` 同时出现 reuse 和 recompute，适合作为主线 document-level sharing baseline。
-- `branching_prefix_sharing` reuse 更多，说明部分 prefix sharing 已经能被 nano-vLLM 的 GPU prefix cache 捕获。
+- `case0` 只验证 GPU prefix hit 链路，baseline 和 V1 基本一致，不用于展示 CPU restore 收益。
+- `cascade` 是容量压力最强的 case：4096/7680 下 GPU reuse 为 0，6144 下只残留 3072 token；V1 能把 baseline 的 recompute token 转成 CPU restore。
+- `hot/cold` 同时存在 GPU reuse 和 GPU miss；baseline 与 V1 的 GPU reuse token 一致，说明 V1 没有牺牲原有 GPU prefix cache，只是在 miss 时补 CPU restore。
+- prefix 越长，V1 的 prefill total 改善越明显；TTFT/request latency 的改善较小，因为它们还包含排队、query suffix prefill、first-token decode 和后续 decode。
+- Poisson arrival 下 median queue 很低，但 max queue 会被局部 burst 放大，因此文档里保留 avg/max 而不把单次 tail 当稳定结论。
 
+### Restore Profile 与带宽检查
 
-## V1 CPU Prefix Cache Smoke 结果
-
-本轮结果目录：
+Profile 目录：
 
 ```text
-results/prefix_cache_cases/v1_smoke/
+exp/profile_v1_restore_20260830/
 ```
 
-| case | mode | prefix reused tokens | CPU restored tokens | estimated recomputed prefix tokens | prefill tokens | query elapsed |
-|---|---|---:|---:|---:|---:|---:|
-| cascade_tile | GPU-only | 0 | 0 | 8192 | 8704 | 1.79 s |
-| cascade_tile | CPU V1 | 0 | 8192 | 0 | 512 | 1.90 s |
-| hot_cold_sharing | GPU-only | 25344 | 0 | 7424 | 9472 | 7.07 s |
-| hot_cold_sharing | CPU V1 | 25344 | 7424 | 0 | 2048 | 7.21 s |
-| branching_prefix_sharing | GPU-only | 52736 | 0 | 4608 | 8192 | 12.59 s |
-| branching_prefix_sharing | CPU V1 | 52736 | 4608 | 0 | 3584 | 12.88 s |
+`document_length = 6144`、`cascade_tile`、`repeat_count = 1` 的拆分：
 
-观察：
+| mode | restore H2D | scheduler total | model CUDA prefill | model runner prefill wall | prefill step | request median | TTFT median |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| baseline | 0.000 s | 0.002 s | 0.552 s | 0.556 s | 0.557 s | 1.226 s | 0.828 s |
+| V1 | 0.054 s | 0.065 s | 0.110 s | 0.112 s | 0.167 s | 0.937 s | 0.551 s |
 
-- V1 的 CPU backing store 已能在 GPU miss 后 restore prefix KV，并跳过对应 prefix prefill。
-- 三个 case 中，GPU-only 的 prefix recompute 都被 CPU V1 消除。
-- 当前 V1 已将 request-finished writeback 改为 `copy_stream + CUDA event` 异步 D2H；完成前 GPU blocks 会被延迟释放。
-- CPU hit 后的 H2D restore 仍是同步等待，因为当前 request 继续 prefill 前必须保证 KV 已在 GPU。
-- 下一步性能优化重点是 clean block eviction、减少重复 writeback、scheduler-aware prefetch。
+V1 的 `restore_latency_sum = 0.054s` 只统计 KV H2D copy；`prefill_step_time = 0.167s` 还包含 restore 后的 96-token query suffix forward。剩余约 0.11s 主要是 GPU prefill attention，不是 CPU 处理开销。
 
-## 指标说明
+本机 host-device pinned copy 带宽：
 
-当前 prefix-cache 主线主要看：
+| size | H2D avg / median | D2H avg / median |
+|---:|---:|---:|
+| 64 MiB | 14.03 / 14.05 GB/s | 48.12 / 48.08 GB/s |
+| 256 MiB | 19.83 / 19.76 GB/s | 41.31 / 41.30 GB/s |
+| 1024 MiB | 38.62 / 38.90 GB/s | 33.69 / 33.69 GB/s |
+| 2048 MiB | 49.49 / 49.59 GB/s | 31.89 / 31.88 GB/s |
 
-- `prefix_cache_lookup_count`
-- `prefix_cache_reused_token_count`
-- `prefill_token_count`
-- `document_recomputed_tokens_est`
-- `query_latency_sec`
-- `query_elapsed_sec`
+`nvidia-smi topo -m` 显示 GPU 到 CPU 是 `NODE` 路径，不是 NVLink。V1 restore 读 2.72 GB 用 0.054s，折算约 50.6 GB/s，和大块 H2D 带宽测试吻合。
 
-其中 `document_recomputed_tokens_est` 是当前 GPU-only baseline 下估算的 prefix 重算量。后续加入 CPU prefix cache 后，目标是把这部分 GPU miss 从重新 prefill 转换为 CPU KV restore。
+### 旧版 Sanity 结果
+
+旧实验目录：
+
+```text
+exp/doclen_sweep_v1_vs_recompute_queue_20260830_100635/
+```
+
+这组实验使用一次性批量提交，并且 `max_num_seqs=1`，会人为制造很重的排队时间。现在只保留为 sanity：它证明了 prefix 越长，V1 把 recompute 转成 restore 后 prefill 路径收益越明显；但不再作为主 serving benchmark 结论。
 
 ## 下一步
 
-1. 固化当前 GPU-only prefix cache baseline，作为 V1/V2 对照组。
-2. 实现 logical block 粒度的 CPU prefix cache backing store。
-3. request 完成时通过 `copy_stream + CUDA event` 异步写回 CPU，并在完成前延迟释放对应 GPU blocks。
-4. GPU miss + CPU hit 时同步 restore 到 GPU，并跳过对应 prefix prefill。
-5. eviction 优先驱逐已经 CPU-resident 的 clean GPU blocks；否则 LRU 同步写回。
-6. 后续实现 scheduler-aware OPT eviction 和 async prefetch。
-7. 用 `cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing` 对比 GPU-only 与 GPU+CPU。
+1. 把当前 V1 作为 baseline 对照，继续扩大 prefix length / working set，观察 H2D restore 与 recompute 的边界。
+2. 拆出更细的 restore 开销：H2D latency、CPU KV resident bytes、restore blocks/token 分布。
+3. 实现 V2 scheduler-aware prefetch：当前 request 运行时，提前把后续 CPU-resident prefix copy 回 GPU。
+4. 实现 OPT-like eviction oracle：根据后续访问序列驱逐最晚再访问的 prefix block，用于评估调度与 cache 协同收益上界。
+5. 控制 pending writeback backpressure，避免 protected blocks 在高压力场景下长期占用 GPU cache。

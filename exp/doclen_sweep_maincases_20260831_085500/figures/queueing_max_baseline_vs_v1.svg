@@ -1,0 +1,45 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1180" height="470" viewBox="0 0 1180 470">
+<rect width="100%" height="100%" fill="white"/>
+<text x="590.0" y="26" text-anchor="middle" font-family="Arial" font-size="18" fill="#222222">Queueing latency max</text>
+<text x="18" y="212.0" transform="rotate(-90 18 212.0)" text-anchor="middle" font-family="Arial" font-size="13" fill="#222222">seconds</text>
+<line x1="78" y1="376.0" x2="1156" y2="376.0" stroke="#d8d8d8" stroke-width="1"/>
+<text x="70" y="380.0" text-anchor="end" font-family="Arial" font-size="11" fill="#222222">0.00</text>
+<line x1="78" y1="294.0" x2="1156" y2="294.0" stroke="#d8d8d8" stroke-width="1"/>
+<text x="70" y="298.0" text-anchor="end" font-family="Arial" font-size="11" fill="#222222">0.27</text>
+<line x1="78" y1="212.0" x2="1156" y2="212.0" stroke="#d8d8d8" stroke-width="1"/>
+<text x="70" y="216.0" text-anchor="end" font-family="Arial" font-size="11" fill="#222222">0.55</text>
+<line x1="78" y1="130.0" x2="1156" y2="130.0" stroke="#d8d8d8" stroke-width="1"/>
+<text x="70" y="134.0" text-anchor="end" font-family="Arial" font-size="11" fill="#222222">0.82</text>
+<line x1="78" y1="48.0" x2="1156" y2="48.0" stroke="#d8d8d8" stroke-width="1"/>
+<text x="70" y="52.0" text-anchor="end" font-family="Arial" font-size="11" fill="#222222">1.09</text>
+<line x1="78" y1="376" x2="1156" y2="376" stroke="#333"/>
+<line x1="78" y1="48" x2="78" y2="376" stroke="#333"/>
+<rect x="138.2" y="314.9" width="28.0" height="61.1" fill="#5577aa"/>
+<rect x="169.5" y="318.5" width="28.0" height="57.5" fill="#d28a43"/>
+<text x="167.8" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">4096</text>
+<text x="167.8" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">cascade</text>
+<rect x="317.8" y="120.8" width="28.0" height="255.2" fill="#5577aa"/>
+<rect x="349.2" y="83.1" width="28.0" height="292.9" fill="#d28a43"/>
+<text x="347.5" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">4096</text>
+<text x="347.5" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">hot/cold</text>
+<rect x="497.5" y="307.3" width="28.0" height="68.7" fill="#5577aa"/>
+<rect x="528.8" y="324.6" width="28.0" height="51.4" fill="#d28a43"/>
+<text x="527.2" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">6144</text>
+<text x="527.2" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">cascade</text>
+<rect x="677.2" y="205.9" width="28.0" height="170.1" fill="#5577aa"/>
+<rect x="708.5" y="220.4" width="28.0" height="155.6" fill="#d28a43"/>
+<text x="706.8" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">6144</text>
+<text x="706.8" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">hot/cold</text>
+<rect x="856.8" y="289.2" width="28.0" height="86.8" fill="#5577aa"/>
+<rect x="888.2" y="323.2" width="28.0" height="52.8" fill="#d28a43"/>
+<text x="886.5" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">7680</text>
+<text x="886.5" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">cascade</text>
+<rect x="1036.5" y="153.4" width="28.0" height="222.6" fill="#5577aa"/>
+<rect x="1067.8" y="179.0" width="28.0" height="197.0" fill="#d28a43"/>
+<text x="1066.2" y="396" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">7680</text>
+<text x="1066.2" y="412" text-anchor="middle" font-family="Arial" font-size="11" fill="#222222">hot/cold</text>
+<rect x="86" y="442" width="13" height="13" fill="#5577aa"/>
+<text x="104" y="453" font-family="Arial" font-size="12" fill="#222222">baseline</text>
+<rect x="236" y="442" width="13" height="13" fill="#d28a43"/>
+<text x="254" y="453" font-family="Arial" font-size="12" fill="#222222">V1</text>
+</svg>
