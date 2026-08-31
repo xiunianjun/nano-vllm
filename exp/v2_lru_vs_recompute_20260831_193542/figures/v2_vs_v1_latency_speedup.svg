@@ -1,0 +1,49 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="980" height="440" viewBox="0 0 980 440">
+<rect width="100%" height="100%" fill="white"/>
+<text x="490.0" y="28" text-anchor="middle" font-family="Arial" font-size="18" font-weight="700" fill="#20242a">V2 vs V1 latency speedup</text>
+<text x="20" y="204.0" transform="rotate(-90 20 204.0)" text-anchor="middle" font-family="Arial" font-size="13" fill="#20242a">speedup (V1 / V2, higher is better)</text>
+<line x1="88" y1="354.0" x2="950" y2="354.0" stroke="#d9dee7"/>
+<text x="78" y="358.0" text-anchor="end" font-family="Arial" font-size="11" fill="#20242a">0.00</text>
+<line x1="88" y1="279.0" x2="950" y2="279.0" stroke="#d9dee7"/>
+<text x="78" y="283.0" text-anchor="end" font-family="Arial" font-size="11" fill="#20242a">0.36</text>
+<line x1="88" y1="204.0" x2="950" y2="204.0" stroke="#d9dee7"/>
+<text x="78" y="208.0" text-anchor="end" font-family="Arial" font-size="11" fill="#20242a">0.72</text>
+<line x1="88" y1="129.0" x2="950" y2="129.0" stroke="#d9dee7"/>
+<text x="78" y="133.0" text-anchor="end" font-family="Arial" font-size="11" fill="#20242a">1.09</text>
+<line x1="88" y1="54.0" x2="950" y2="54.0" stroke="#d9dee7"/>
+<text x="78" y="58.0" text-anchor="end" font-family="Arial" font-size="11" fill="#20242a">1.45</text>
+<rect x="132.8" y="119.4" width="39.0" height="234.6" fill="#315f9f"/>
+<text x="152.2" y="114.4" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.13</text>
+<rect x="348.2" y="141.6" width="39.0" height="212.4" fill="#315f9f"/>
+<text x="367.8" y="136.6" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.03</text>
+<rect x="563.8" y="119.3" width="39.0" height="234.7" fill="#315f9f"/>
+<text x="583.2" y="114.3" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.13</text>
+<rect x="779.2" y="99.8" width="39.0" height="254.2" fill="#315f9f"/>
+<text x="798.8" y="94.8" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.23</text>
+<rect x="174.8" y="136.1" width="39.0" height="217.9" fill="#d96c2c"/>
+<text x="194.2" y="131.1" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.05</text>
+<rect x="390.2" y="128.8" width="39.0" height="225.2" fill="#d96c2c"/>
+<text x="409.8" y="123.8" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.09</text>
+<rect x="605.8" y="143.5" width="39.0" height="210.5" fill="#d96c2c"/>
+<text x="625.2" y="138.5" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.02</text>
+<rect x="821.2" y="120.8" width="39.0" height="233.2" fill="#d96c2c"/>
+<text x="840.8" y="115.8" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.13</text>
+<rect x="216.8" y="160.5" width="39.0" height="193.5" fill="#4f8a4b"/>
+<text x="236.2" y="155.5" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">0.93</text>
+<rect x="432.2" y="132.8" width="39.0" height="221.2" fill="#4f8a4b"/>
+<text x="451.8" y="127.8" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.07</text>
+<rect x="647.8" y="150.5" width="39.0" height="203.5" fill="#4f8a4b"/>
+<text x="667.2" y="145.5" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">0.98</text>
+<rect x="863.2" y="145.6" width="39.0" height="208.4" fill="#4f8a4b"/>
+<text x="882.8" y="140.6" text-anchor="middle" font-family="Arial" font-size="10" fill="#20242a">1.01</text>
+<text x="195.8" y="380" text-anchor="middle" font-family="Arial" font-size="12" fill="#20242a">case0</text>
+<text x="411.2" y="380" text-anchor="middle" font-family="Arial" font-size="12" fill="#20242a">cascade</text>
+<text x="626.8" y="380" text-anchor="middle" font-family="Arial" font-size="12" fill="#20242a">hot/cold</text>
+<text x="842.2" y="380" text-anchor="middle" font-family="Arial" font-size="12" fill="#20242a">branching</text>
+<rect x="88" y="401" width="12" height="12" fill="#315f9f"/>
+<text x="106" y="412" font-family="Arial" font-size="12" fill="#20242a">prefill total</text>
+<rect x="298" y="401" width="12" height="12" fill="#d96c2c"/>
+<text x="316" y="412" font-family="Arial" font-size="12" fill="#20242a">TTFT median</text>
+<rect x="508" y="401" width="12" height="12" fill="#4f8a4b"/>
+<text x="526" y="412" font-family="Arial" font-size="12" fill="#20242a">request median</text>
+</svg>
