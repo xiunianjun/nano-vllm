@@ -20,7 +20,13 @@ class Scheduler:
         # key 是异步 D2H writeback id，value 是本次写回涉及的 prefix blocks；
         # pending 期间这些 GPU blocks 仍保存有效 KV，但不能回到 free list。
         self.pending_prefix_writebacks = {}
-        self.block_manager = BlockManager(config.num_kvcache_blocks, config.kvcache_block_size, config.enable_prefix_cache)
+        self.block_manager = BlockManager(
+            config.num_kvcache_blocks,
+            config.kvcache_block_size,
+            config.enable_prefix_cache,
+            # 开关含义：V1 关闭 inactive GPU LRU；V2 打开 inactive GPU LRU。
+            config.enable_gpu_lru_retention,
+        )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
         self.reset_metrics()
@@ -32,24 +38,37 @@ class Scheduler:
             "prefill_token_count": 0,
             "prefix_cache_lookup_count": 0,
             "prefix_cache_reused_token_count": 0,
+            "gpu_prefix_miss_request_count": 0,
             # CPU prefix cache 指标用于区分：GPU 直接命中 vs CPU 命中后 restore。
             "cpu_prefix_cache_hit_count": 0,
             "cpu_prefix_cache_restored_token_count": 0,
+            # sync_swapin 只统计 demand path 上的 GPU miss + CPU hit + 同步 H2D。
+            # V3 prefetch 成功后如果已经变成 GPU hit，不应该计入这里。
+            "cpu_sync_swapin_request_count": 0,
+            "cpu_sync_swapin_block_count": 0,
+            "cpu_sync_swapin_token_count": 0,
             "pending_prefix_writeback_count": 0,
         }
+        self.block_manager.reset_metrics()
 
     def get_metrics(self):
-        return {
+        metrics = {
             "preemption_count": self.metrics["preemption_count"],
             "recomputed_token_count": self.metrics["recomputed_token_count"],
             "prefill_token_count": self.metrics["prefill_token_count"],
             "prefix_cache_lookup_count": self.metrics["prefix_cache_lookup_count"],
             "prefix_cache_reused_token_count": self.metrics["prefix_cache_reused_token_count"],
+            "gpu_prefix_miss_request_count": self.metrics["gpu_prefix_miss_request_count"],
             "cpu_prefix_cache_hit_count": self.metrics["cpu_prefix_cache_hit_count"],
             "cpu_prefix_cache_restored_token_count": self.metrics["cpu_prefix_cache_restored_token_count"],
+            "cpu_sync_swapin_request_count": self.metrics["cpu_sync_swapin_request_count"],
+            "cpu_sync_swapin_block_count": self.metrics["cpu_sync_swapin_block_count"],
+            "cpu_sync_swapin_token_count": self.metrics["cpu_sync_swapin_token_count"],
             # 返回实时 pending 数，避免 reset 后 metrics 里的旧值和实际状态不一致。
             "pending_prefix_writeback_count": len(self.pending_prefix_writebacks),
         }
+        metrics.update(self.block_manager.get_metrics())
+        return metrics
 
 
     def _pending_writeback_block_ids(self) -> set[int]:
@@ -91,17 +110,17 @@ class Scheduler:
         if not entries:
             seq.prefix_writeback_started = True
             return
-        # V1 主动写回：prompt prefill 一完成，就把完整 prefix blocks 异步 D2H 到 CPU。
+        # 主动写回：prompt prefill 一完成，就把完整 prefix blocks 异步 D2H 到 CPU。
         # decode 新产生的 tokens 暂时不纳入 prefix cache；后续请求重新 prefill 后再进入 cache。
         # 写回前会去重：CPU 已有或正在 pending writeback 的 prefix block 不再重复 D2H。
-        writeback_id = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
-        if writeback_id is not None:
+        writeback_ids = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
+        for writeback_id, entry in zip(writeback_ids, entries):
             self.pending_prefix_writebacks[writeback_id] = {
-                "entries": entries,
+                "entries": [entry],
                 "release_on_complete": release_on_complete,
             }
-            seq.prefix_writeback_started = True
-            self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
+        seq.prefix_writeback_started = True
+        self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
 
     # 回收一下写完的 prefix blocks，用于后续使用。wait=True 时阻塞等待
     def _poll_prefix_writebacks(self, wait: bool = False):
@@ -158,12 +177,21 @@ class Scheduler:
                 num_cached_blocks = len(plan["sources"])
                 gpu_hits = sum(1 for source, _h, _tokens in plan["sources"] if source == "gpu")
                 cpu_hits = num_cached_blocks - gpu_hits
+                cacheable_prefix_blocks = max(seq.num_blocks - 1, 0)
                 # GPU hit 和 CPU hit 都可以跳过对应 prefix prefill；区别是 CPU hit 需要先 H2D restore。
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
                 self.metrics["prefix_cache_lookup_count"] += 1
+                if gpu_hits < cacheable_prefix_blocks:
+                    self.metrics["gpu_prefix_miss_request_count"] += 1
                 self.metrics["prefix_cache_reused_token_count"] += gpu_hits * self.block_size
                 self.metrics["cpu_prefix_cache_hit_count"] += cpu_hits
                 self.metrics["cpu_prefix_cache_restored_token_count"] += cpu_hits * self.block_size
+                if cpu_hits:
+                    # 这里统计的是关键路径上的 demand sync swapin：GPU miss、CPU hit，且必须立刻 H2D 才能继续 prefill。
+                    # V3 如果提前 prefetch 成功，request 到这里应表现为 GPU hit，不能再计入 sync_swapin。
+                    self.metrics["cpu_sync_swapin_request_count"] += 1
+                    self.metrics["cpu_sync_swapin_block_count"] += cpu_hits
+                    self.metrics["cpu_sync_swapin_token_count"] += cpu_hits * self.block_size
             else:
                 plan = None
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
@@ -224,8 +252,11 @@ class Scheduler:
             self.metrics["preemption_count"] += 1
             seq.num_preemptions += 1
             if self.enable_cpu_kv_offload:
+                # CPU offload 打开时，完整 prefix block 已有 CPU backing 或正在写回。
+                # 抢占后真正需要 recompute 的，只是 decode 产生的最后一个未满 block。
                 seq.recompute_pending_tokens += self._decode_tail_tokens_without_prefix_backing(seq)
             else:
+                # baseline 没有 CPU backing，抢占释放的 cached tokens 都要靠后续 prefill 重算。
                 seq.recompute_pending_tokens += lost_tokens
         seq.status = SequenceStatus.WAITING
         seq.is_prefill = True
@@ -256,6 +287,6 @@ class Scheduler:
                 self.running.remove(seq)
 
 
-# TODO(V2): 调度感知预取可以放在 Scheduler.schedule() 的 prefill/decode 决策之后。
+# TODO(V3): 调度感知预取可以放在 Scheduler.schedule() 的 prefill/decode 决策之后。
 # 目标是 inspect waiting/running 队列，优先 prefetch 即将运行的 CPU-resident prefix；
 # 如果 GPU KV 空间不足，victim 可以用 OPT-style 策略选择当前窗口内最晚再访问的 prefix。

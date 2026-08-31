@@ -41,6 +41,7 @@ def parse_args():
     parser.add_argument("--kvcache-block-size", type=int, default=256)
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--enable-gpu-lru-retention", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-tqdm", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -275,6 +276,7 @@ def main():
         num_kvcache_blocks=num_kvcache_blocks,
         enable_prefix_cache=True,
         enable_cpu_kv_offload=args.enable_cpu_kv_offload,
+        enable_gpu_lru_retention=args.enable_gpu_lru_retention,
     )
 
     llm.generate([[ids[1]]], SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1), use_tqdm=False)
@@ -296,6 +298,8 @@ def main():
         working_set_tokens = num_documents * args.document_length
     working_set_gb = working_set_tokens * bytes_per_token / GB
     gpu_cache_gb_actual = num_kvcache_blocks * args.kvcache_block_size * bytes_per_token / GB
+    single_prompt_tokens_est = reusable_prefix_length + args.query_length + args.output_len
+    single_prompt_kv_gb_est = single_prompt_tokens_est * bytes_per_token / GB
     total_document_tokens = len(measured_prompts) * reusable_prefix_length
     restored_tokens = metrics.get("cpu_prefix_cache_restored_token_count", 0)
     reused_or_restored = metrics["prefix_cache_reused_token_count"] + restored_tokens
@@ -304,8 +308,15 @@ def main():
 
     result = {
         "model": args.model,
-        "mode": "cpu_prefix_cache_v1" if args.enable_cpu_kv_offload else "gpu_prefix_cache_recompute_baseline",
+        "mode": (
+            "cpu_prefix_cache_v2_lru"
+            if args.enable_cpu_kv_offload and args.enable_gpu_lru_retention
+            else "cpu_prefix_cache_v1"
+            if args.enable_cpu_kv_offload
+            else "gpu_prefix_cache_recompute_baseline"
+        ),
         "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
+        "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
         "workload": args.workload,
         "repeat_mode": args.repeat_mode,
         "repeat_count": args.repeat_count,
@@ -326,6 +337,11 @@ def main():
         "target_working_set_gb": args.target_working_set_gb,
         "working_set_tokens": working_set_tokens,
         "working_set_gb_actual": working_set_gb,
+        "working_set_to_gpu_kv_ratio": working_set_gb / gpu_cache_gb_actual if gpu_cache_gb_actual else 0,
+        "single_prompt_tokens_est": single_prompt_tokens_est,
+        "single_prompt_kv_gb_est": single_prompt_kv_gb_est,
+        "single_prompt_to_gpu_kv_ratio": single_prompt_kv_gb_est / gpu_cache_gb_actual if gpu_cache_gb_actual else 0,
+        "single_prompt_fit_count_est": int(gpu_cache_gb_actual // single_prompt_kv_gb_est) if single_prompt_kv_gb_est else 0,
         "gpu_kv_cache_gb_requested": args.gpu_kv_cache_gb,
         "gpu_kv_cache_gb_actual": gpu_cache_gb_actual,
         "num_kvcache_blocks": num_kvcache_blocks,

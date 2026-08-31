@@ -19,6 +19,8 @@ class Config:
     enable_prefix_cache: bool = True
     # 打开后启用 V1 GPU+CPU 两级 prefix cache；权重仍常驻 GPU，只 offload prefix KV blocks。
     enable_cpu_kv_offload: bool = False
+    # V2: request 结束后把 GPU prefix blocks 留在 inactive LRU cache 中，直到显存需要时再淘汰。
+    enable_gpu_lru_retention: bool = True
 
     def __post_init__(self):
         assert os.path.isdir(self.model)

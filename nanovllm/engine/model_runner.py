@@ -204,10 +204,9 @@ class ModelRunner:
 
     def poll_prefix_writebacks(self, wait: bool = False):
         # CUDA 没有 Python 层自动回调；这里用 done_event.query() 判断 async D2H 是否完成。
-        # query() 是非阻塞检查，synchronize() 是阻塞等待。
-        if wait and self.pending_prefix_writebacks:
-            # V1 只在需要完全 drain pending writes 时阻塞等待；普通调度路径走 query()。
-            self.pending_prefix_writebacks[0]["done_event"].synchronize()
+        if wait:
+            for pending in self.pending_prefix_writebacks:
+                pending["done_event"].synchronize()
 
         completed_ids = []
         still_pending = []
@@ -222,40 +221,33 @@ class ModelRunner:
 
     def writeback_prefix_blocks(self, entries):
         # 主动写回：request 完成后把已完成 hash 的 prefix KV 异步搬到 CPU pinned memory。
-        # 注意：D2H 还没完成前，对应 GPU block 仍然是 protected，不能被其他 request 占用。
+        # 每个 block 单独记录 event；已完成的 block 可以先进入 CPU-backed LRU，未完成的继续 protected。
         if not entries:
-            return None
+            return []
 
-        writeback_id = self.next_prefix_writeback_id
-        self.next_prefix_writeback_id += 1
-        # compute_done 用来保证 copy stream 不会读到尚未写完的 GPU KV。
-        # start/done event 一方面给 Scheduler 提供完成通知，一方面统计 D2H latency。
         compute_done = torch.cuda.Event()
-        start_event = torch.cuda.Event(enable_timing=True)
-        done_event = torch.cuda.Event(enable_timing=True)
         torch.cuda.current_stream().record_event(compute_done)
-
-        blocks = []
+        writeback_ids = []
         with torch.cuda.stream(self.copy_stream):
-            # 等当前 compute stream 写完 KV 后，再在 copy stream 上开始 D2H。
             self.copy_stream.wait_event(compute_done)
-            start_event.record()
             for h, block_id in entries:
+                writeback_id = self.next_prefix_writeback_id
+                self.next_prefix_writeback_id += 1
+                start_event = torch.cuda.Event(enable_timing=True)
+                done_event = torch.cuda.Event(enable_timing=True)
                 gpu_block = self.kv_cache[:, :, block_id]
                 cpu_block = torch.empty(gpu_block.shape, dtype=gpu_block.dtype, device="cpu", pin_memory=True)
-                # pinned CPU tensor + non_blocking=True 才能让 D2H 真正排到 copy stream 上异步执行。
+                start_event.record()
                 cpu_block.copy_(gpu_block, non_blocking=True)
-                blocks.append((h, cpu_block))
-            done_event.record()
-
-        # 此时 copy 可能还没完成；先记录 pending，让 Scheduler 暂时保护这些 GPU blocks。
-        self.pending_prefix_writebacks.append({
-            "id": writeback_id,
-            "blocks": blocks,
-            "start_event": start_event,
-            "done_event": done_event,
-        })
-        return writeback_id
+                done_event.record()
+                self.pending_prefix_writebacks.append({
+                    "id": writeback_id,
+                    "blocks": [(h, cpu_block)],
+                    "start_event": start_event,
+                    "done_event": done_event,
+                })
+                writeback_ids.append(writeback_id)
+        return writeback_ids
 
     def _copy_cpu_blocks_to_gpu(self, block_copies):
         # block_copies 是 (CPU KV block, 新 GPU block id)，目前用于 CPU prefix restore。
