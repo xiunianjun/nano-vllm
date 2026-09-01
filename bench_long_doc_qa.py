@@ -42,6 +42,9 @@ def parse_args():
     parser.add_argument("--gpu-memory-utilization", type=float, default=0.9)
     parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enable-gpu-lru-retention", action=argparse.BooleanOptionalAction, default=True)
+    parser.add_argument("--enable-lazy-cpu-kv-writeback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--lazy-writeback-watermark-ratio", type=float, default=0.5)
+    parser.add_argument("--cpu-prefix-cache-gb-limit", type=float, default=0.0)
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--use-tqdm", action=argparse.BooleanOptionalAction, default=False)
     return parser.parse_args()
@@ -277,6 +280,9 @@ def main():
         enable_prefix_cache=True,
         enable_cpu_kv_offload=args.enable_cpu_kv_offload,
         enable_gpu_lru_retention=args.enable_gpu_lru_retention,
+        enable_lazy_cpu_kv_writeback=args.enable_lazy_cpu_kv_writeback,
+        lazy_writeback_watermark_ratio=args.lazy_writeback_watermark_ratio,
+        cpu_prefix_cache_gb_limit=args.cpu_prefix_cache_gb_limit,
     )
 
     llm.generate([[ids[1]]], SamplingParams(temperature=0.6, ignore_eos=True, max_tokens=1), use_tqdm=False)
@@ -309,7 +315,9 @@ def main():
     result = {
         "model": args.model,
         "mode": (
-            "cpu_prefix_cache_v2_lru"
+            "cpu_prefix_cache_v3_lazy_writeback"
+            if args.enable_cpu_kv_offload and args.enable_gpu_lru_retention and args.enable_lazy_cpu_kv_writeback
+            else "cpu_prefix_cache_v2_lru"
             if args.enable_cpu_kv_offload and args.enable_gpu_lru_retention
             else "cpu_prefix_cache_v1"
             if args.enable_cpu_kv_offload
@@ -317,6 +325,9 @@ def main():
         ),
         "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
         "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
+        "enable_lazy_cpu_kv_writeback": args.enable_lazy_cpu_kv_writeback,
+        "lazy_writeback_watermark_ratio": args.lazy_writeback_watermark_ratio,
+        "cpu_prefix_cache_gb_limit": args.cpu_prefix_cache_gb_limit,
         "workload": args.workload,
         "repeat_mode": args.repeat_mode,
         "repeat_count": args.repeat_count,

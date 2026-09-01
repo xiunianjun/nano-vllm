@@ -45,6 +45,9 @@ class BlockManager:
         # inactive LRU: request 已释放引用，但 GPU KV 和 hash 仍有效。
         # OrderedDict 左侧是最久未使用的 victim，右侧是最近释放/命中的 block。
         self.inactive_block_ids: OrderedDict[int, None] = OrderedDict()
+        # D2H pending 的 inactive block 不能被覆盖；等 CUDA event 完成后，
+        # Scheduler 会 register_cpu_blocks()，它才变成“可安全淘汰”的 CPU-backed victim。
+        self.pending_cpu_writeback_block_ids: set[int] = set()
         self.reset_metrics()
 
     def reset_metrics(self):
@@ -52,12 +55,25 @@ class BlockManager:
             "gpu_lru_hit_block_count": 0,
             "gpu_lru_hit_token_count": 0,
             "gpu_lru_eviction_count": 0,
+            "gpu_lru_evicted_cpu_backed_block_count": 0,
+            "gpu_lru_evicted_gpu_only_block_count": 0,
             "gpu_lru_cached_block_peak": len(self.inactive_block_ids),
+            "lazy_writeback_scheduled_block_count": 0,
         }
 
     def get_metrics(self):
         metrics = dict(self.metrics)
+        inactive_cpu_backed = sum(
+            1 for block_id in self.inactive_block_ids
+            if block_id not in self.pending_cpu_writeback_block_ids and self._is_cpu_backed(block_id)
+        )
+        inactive_pending = sum(1 for block_id in self.inactive_block_ids if block_id in self.pending_cpu_writeback_block_ids)
         metrics["gpu_lru_cached_block_count"] = len(self.inactive_block_ids)
+        metrics["inactive_cpu_backed_block_count"] = inactive_cpu_backed
+        metrics["inactive_gpu_only_block_count"] = len(self.inactive_block_ids) - inactive_cpu_backed - inactive_pending
+        metrics["inactive_pending_writeback_block_count"] = inactive_pending
+        metrics["inactive_safe_or_pending_block_count"] = inactive_cpu_backed + inactive_pending
+        metrics["safe_allocatable_block_count"] = len(self.free_block_ids) + inactive_cpu_backed
         return metrics
 
     @classmethod
@@ -77,7 +93,10 @@ class BlockManager:
         exclude_block_ids = exclude_block_ids or set()
         # 可分配容量 = 真正 free 的 blocks + 可以被淘汰的 inactive LRU blocks。
         # exclude_block_ids 是本次 allocate 中已经作为 GPU hit 复用的 blocks，不能又被选作 victim。
-        inactive = sum(1 for block_id in self.inactive_block_ids if block_id not in exclude_block_ids)
+        inactive = sum(
+            1 for block_id in self.inactive_block_ids
+            if block_id not in exclude_block_ids and block_id not in self.pending_cpu_writeback_block_ids
+        )
         return len(self.free_block_ids) + inactive
 
     # 实际抢占逻辑
@@ -130,27 +149,72 @@ class BlockManager:
         block = self.blocks[block_id]
         return block.hash != -1 and self.has_cpu_block(block.hash, block.token_ids)
 
+    def _is_safe_or_pending_victim(self, block_id: int) -> bool:
+        return block_id in self.pending_cpu_writeback_block_ids or self._is_cpu_backed(block_id)
+
+    def victim_window_safe_or_pending_count(self, target_safe_blocks: int) -> int:
+        # V3 只关心 LRU victim 前沿，而不是整个 inactive 队列。
+        # 如果热 block 被复用过，它会回到 MRU 端；即使 CPU-backed，也不该拿来填 victim window。
+        count = 0
+        for i, block_id in enumerate(self.inactive_block_ids):
+            if i >= target_safe_blocks:
+                break
+            if self._is_safe_or_pending_victim(block_id):
+                count += 1
+        return count
+
+    def select_lazy_writeback_entries(self, target_safe_blocks: int, pending_hashes: set[int]):
+        # V3 lazy writeback 只“备份可能马上被淘汰的 inactive blocks”，不碰 active request。
+        # target_safe_blocks 对应 LRU victim 前沿窗口：窗口内 safe/pending 不够，才补写回。
+        # 这样刚被复用、位于 MRU 端的 CPU-backed block 不会让前沿窗口产生虚假的安全感。
+        deficit = target_safe_blocks - self.victim_window_safe_or_pending_count(target_safe_blocks)
+        if deficit <= 0:
+            return []
+        entries = []
+        # OrderedDict 左侧是 LRU victim 侧。只从 victim window 内挑 GPU-only blocks 写回；
+        # 窗口之外的热端 block 即使没有 CPU backing，也暂时不碰。
+        for i, block_id in enumerate(self.inactive_block_ids):
+            if i >= target_safe_blocks or len(entries) >= deficit:
+                break
+            if block_id in self.pending_cpu_writeback_block_ids:
+                continue
+            block = self.blocks[block_id]
+            # 三类 block 不需要再次写回：无有效 hash、相同 hash 已在 pending、CPU 已有 backing。
+            if block.hash == -1 or block.hash in pending_hashes or self.has_cpu_block(block.hash, block.token_ids):
+                continue
+            entries.append((block.hash, block_id, block.token_ids))
+        self.metrics["lazy_writeback_scheduled_block_count"] += len(entries)
+        return entries
+
+    def mark_cpu_writeback_pending(self, entries):
+        # D2H 提交后立即 protected，防止 allocator 在 copy 完成前覆盖该 GPU block。
+        for _h, block_id, _tokens in entries:
+            self.pending_cpu_writeback_block_ids.add(block_id)
+
     def _evict_inactive_block(self, exclude_block_ids: set[int] | None = None) -> int:
         exclude_block_ids = exclude_block_ids or set()
         victim = None
-        # 淘汰顺序仍是 LRU，但先挑 CPU 已有 backing 的 block。
-        # 这样即使 GPU copy 被覆盖，下次 miss 也能从 CPU restore，而不是重新 prefill。
-        for prefer_cpu_backed in (True, False):
-            for block_id in self.inactive_block_ids:
-                if block_id in exclude_block_ids:
-                    continue
-                if prefer_cpu_backed and not self._is_cpu_backed(block_id):
-                    continue
-                victim = block_id
-                break
-            if victim is not None:
-                break
+        # 真正的 GPU 驱逐发生在 allocation 路径：free list 为空时才调用这里。
+        # 不再“全局优先 CPU-backed”，而是严格沿 LRU victim 前沿往后找。
+        # 这样刚被复用过、回到 MRU 端的 CPU-backed block 不会被跨顺序提前淘汰。
+        for block_id in self.inactive_block_ids:
+            # exclude 是本次 allocate 已经命中的 GPU prefix，pending 是 copy stream 正在读取的 block；
+            # 两者都不能在同一次 allocation 里被选成 victim。
+            if block_id in exclude_block_ids or block_id in self.pending_cpu_writeback_block_ids:
+                continue
+            victim = block_id
+            break
         assert victim is not None
+        was_cpu_backed = self._is_cpu_backed(victim)
         self.inactive_block_ids.pop(victim)
         # victim 被覆盖前必须删掉 GPU hash mapping，否则后续会误判成 GPU hit。
         self._remove_hash_mapping(victim)
         self.blocks[victim].invalidate()
         self.metrics["gpu_lru_eviction_count"] += 1
+        if was_cpu_backed:
+            self.metrics["gpu_lru_evicted_cpu_backed_block_count"] += 1
+        else:
+            self.metrics["gpu_lru_evicted_gpu_only_block_count"] += 1
         return victim
 
     # 返回 request 的 block 布局：[GPU, CPU, miss]
@@ -245,8 +309,17 @@ class BlockManager:
         return self.cpu_hash_to_token_ids.get(h) == block_token_ids
 
     def register_cpu_blocks(self, entries):
-        for h, _global_block_id, block_token_ids in entries:
+        # ModelRunner 确认 D2H 完成后调用：metadata 与真实 CPU tensor 同步可见。
+        # discard pending 后，该 inactive block 就能作为 CPU-backed victim 被优先淘汰。
+        for h, global_block_id, block_token_ids in entries:
+            self.pending_cpu_writeback_block_ids.discard(global_block_id)
             self.cpu_hash_to_token_ids[h] = block_token_ids
+
+    def unregister_cpu_blocks(self, hashes):
+        # CPU cache 容量限制可能会淘汰 backing tensor；Scheduler 收到后删掉 metadata，
+        # 防止后续把已经被清掉的 prefix 误判为 CPU hit。
+        for h in hashes:
+            self.cpu_hash_to_token_ids.pop(h, None)
 
     def release_blocks(self, global_block_ids):
         # global_block_ids 按 request 内的 prefix 顺序排列：越靠前的 block 代表越短、越通用的 prefix。

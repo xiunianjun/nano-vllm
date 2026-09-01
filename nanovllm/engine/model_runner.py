@@ -1,4 +1,5 @@
 import pickle
+from collections import OrderedDict
 from time import perf_counter
 import torch
 import torch.distributed as dist
@@ -28,7 +29,10 @@ class ModelRunner:
         self.event = event
         # V1 prefix offload: 以 prefix block hash 为 key 保存 CPU backing KV。
         # request 完成后 GPU KV 不立刻清空；只要 block 尚未被覆盖，GPU/CPU 可以同时持有同一份 prefix。
-        self.cpu_prefix_cache = {}
+        self.cpu_prefix_cache = OrderedDict()
+        # V3 可选 CPU cache cap。超过后按 CPU LRU 淘汰 backing tensor；
+        # 被淘汰的 hash 会返回给 Scheduler/BlockManager 删除 CPU-hit metadata。
+        self.cpu_prefix_cache_limit_bytes = int(config.cpu_prefix_cache_gb_limit * (1 << 30))
         # 异步 writeback 的完成状态由 CUDA event 标记，Scheduler 轮询完成后再释放 protected GPU block。
         self.pending_prefix_writebacks = []
         self.next_prefix_writeback_id = 0
@@ -159,6 +163,8 @@ class ModelRunner:
             "cpu_prefix_h2d_bytes": 0,
             "cpu_prefix_kv_bytes": cpu_kv_bytes,
             "cpu_prefix_kv_bytes_peak": cpu_kv_bytes,
+            "cpu_prefix_cache_eviction_count": 0,
+            "cpu_prefix_cache_evicted_bytes": 0,
             "cpu_prefix_writeback_latency_sum": 0.0,
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
@@ -186,9 +192,24 @@ class ModelRunner:
         metrics["cpu_prefix_restore_latency_avg"] = metrics["cpu_prefix_restore_latency_sum"] / restore_count if restore_count else 0.0
         return metrics
 
+    def _enforce_cpu_prefix_cache_limit(self):
+        if self.cpu_prefix_cache_limit_bytes <= 0:
+            return []
+        evicted_hashes = []
+        # cpu_prefix_cache 也是 OrderedDict：restore/writeback 命中会 move_to_end，
+        # 因此 last=False 淘汰的是 CPU 侧最久未使用的 backing。
+        while self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] > self.cpu_prefix_cache_limit_bytes and self.cpu_prefix_cache:
+            h, entry = self.cpu_prefix_cache.popitem(last=False)
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= entry["bytes"]
+            self.prefix_transfer_metrics["cpu_prefix_cache_eviction_count"] += 1
+            self.prefix_transfer_metrics["cpu_prefix_cache_evicted_bytes"] += entry["bytes"]
+            evicted_hashes.append(h)
+        return evicted_hashes
+
     def _record_completed_prefix_writeback(self, pending):
         # D2H event 已完成后才把 CPU tensor 放入正式 cache；
         # 这样 Scheduler 看到 CPU hit 时，一定能安全地从 cpu_prefix_cache 取到完整 KV。
+        # 对 V3 来说，这一步也是“pending victim”变成“CPU-backed victim”的分界点。
         bytes_written = 0
         for h, cpu_block in pending["blocks"]:
             nbytes = cpu_block.numel() * cpu_block.element_size()
@@ -197,6 +218,7 @@ class ModelRunner:
                 # 相同 prefix 被再次写回时覆盖旧 CPU backing，避免 CPU occupancy 重复计数。
                 self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= old["bytes"]
             self.cpu_prefix_cache[h] = {"block": cpu_block, "bytes": nbytes}
+            self.cpu_prefix_cache.move_to_end(h)
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] += nbytes
             bytes_written += nbytes
 
@@ -208,26 +230,30 @@ class ModelRunner:
         self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"] = max(
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
         )
+        return self._enforce_cpu_prefix_cache_limit()
 
     def poll_prefix_writebacks(self, wait: bool = False):
         # CUDA 没有 Python 层自动回调；这里用 done_event.query() 判断 async D2H 是否完成。
+        # wait=False 是普通 scheduler tick 的非阻塞收割；wait=True 只在必须释放 protected blocks 时使用。
         if wait:
             for pending in self.pending_prefix_writebacks:
                 pending["done_event"].synchronize()
 
         completed_ids = []
+        evicted_hashes = []
         still_pending = []
         for pending in self.pending_prefix_writebacks:
             if pending["done_event"].query():
-                self._record_completed_prefix_writeback(pending)
+                evicted_hashes.extend(self._record_completed_prefix_writeback(pending))
                 completed_ids.append(pending["id"])
             else:
                 still_pending.append(pending)
         self.pending_prefix_writebacks = still_pending
-        return completed_ids
+        return {"completed_ids": completed_ids, "evicted_hashes": evicted_hashes}
 
     def writeback_prefix_blocks(self, entries):
-        # 主动写回：request 完成后把已完成 hash 的 prefix KV 异步搬到 CPU pinned memory。
+        # D2H 写回统一走这里：V1/V2 传入的是 prefill 完整 prefix，V3 传入的是
+        # inactive LRU victim 侧挑出的少量 blocks。真实 copy 是异步的，返回的 id 交给 Scheduler 跟踪。
         # 每个 block 单独记录 event；已完成的 block 可以先进入 CPU-backed LRU，未完成的继续 protected。
         if not entries:
             return []
@@ -243,6 +269,7 @@ class ModelRunner:
                 start_event = torch.cuda.Event(enable_timing=True)
                 done_event = torch.cuda.Event(enable_timing=True)
                 gpu_block = self.kv_cache[:, :, block_id]
+                # pinned CPU tensor 才能让 non_blocking D2H 真正异步排到 copy stream 上。
                 cpu_block = torch.empty(gpu_block.shape, dtype=gpu_block.dtype, device="cpu", pin_memory=True)
                 start_event.record()
                 cpu_block.copy_(gpu_block, non_blocking=True)
@@ -274,7 +301,11 @@ class ModelRunner:
         done_event = torch.cuda.Event(enable_timing=True)
         torch.cuda.current_stream().record_event(compute_done)
         # entries 来自 BlockManager.allocate，GPU block 已经占住；这里只负责把 CPU KV 填进去。
-        block_copies = [(self.cpu_prefix_cache[h]["block"], block_id) for h, block_id in entries]
+        block_copies = []
+        for h, block_id in entries:
+            # H2D restore 本身也刷新 CPU LRU recency：最近被拿来复用的 prefix 不该先被 CPU cap 淘汰。
+            self.cpu_prefix_cache.move_to_end(h)
+            block_copies.append((self.cpu_prefix_cache[h]["block"], block_id))
         with torch.cuda.stream(self.copy_stream):
             # H2D 也走 copy stream；V1 这里随后 synchronize，语义上是同步 swapin/restore。
             self.copy_stream.wait_event(compute_done)

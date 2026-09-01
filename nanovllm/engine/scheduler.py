@@ -1,4 +1,5 @@
 from collections import deque
+import math
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
@@ -13,6 +14,19 @@ class Scheduler:
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
         self.enable_cpu_kv_offload = config.enable_cpu_kv_offload
+        self.enable_lazy_cpu_kv_writeback = (
+            config.enable_cpu_kv_offload
+            and config.enable_gpu_lru_retention
+            and config.enable_lazy_cpu_kv_writeback
+        )
+        target_alloc_blocks = math.ceil(self.max_num_batched_tokens / self.block_size)
+        # V3 memory-aware selective writeback 的目标窗口来自 vLLM lazy offload 思路：
+        # 一轮 scheduler step 最多新增 target_alloc_blocks 个 KV blocks，再乘 watermark 留冗余。
+        # 这里维护的是 inactive LRU 中“已 CPU-backed 或正在写回”的 victim 数量，
+        # 而不是一看到 request prefill 完就把它的所有 prefix 都搬到 CPU。
+        self.lazy_writeback_target_blocks = math.ceil(
+            target_alloc_blocks * (1 + config.lazy_writeback_watermark_ratio)
+        )
         # V1 prefix offload 通过 LLMEngine 注入 ModelRunner 侧的 copy 回调。
         self.writeback_prefix_blocks = None
         self.restore_prefix_blocks = None
@@ -48,6 +62,9 @@ class Scheduler:
             "cpu_sync_swapin_block_count": 0,
             "cpu_sync_swapin_token_count": 0,
             "pending_prefix_writeback_count": 0,
+            "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
+            "lazy_writeback_completed_block_count": 0,
+            "cpu_prefix_cache_evicted_metadata_count": 0,
         }
         self.block_manager.reset_metrics()
 
@@ -66,12 +83,21 @@ class Scheduler:
             "cpu_sync_swapin_token_count": self.metrics["cpu_sync_swapin_token_count"],
             # 返回实时 pending 数，避免 reset 后 metrics 里的旧值和实际状态不一致。
             "pending_prefix_writeback_count": len(self.pending_prefix_writebacks),
+            "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
+            "lazy_writeback_completed_block_count": self.metrics["lazy_writeback_completed_block_count"],
+            "cpu_prefix_cache_evicted_metadata_count": self.metrics["cpu_prefix_cache_evicted_metadata_count"],
         }
         metrics.update(self.block_manager.get_metrics())
+        metrics["victim_window_safe_or_pending_block_count"] = (
+            self.block_manager.victim_window_safe_or_pending_count(self.lazy_writeback_target_blocks)
+            if self.enable_lazy_cpu_kv_writeback else 0
+        )
         return metrics
 
 
     def _pending_writeback_block_ids(self) -> set[int]:
+        # 这些 block 的 D2H 已经提交但尚未完成。GPU KV 仍有效，
+        # 但不能被 allocator 覆盖；否则 copy stream 可能读到被新请求改写后的内容。
         return {
             block_id
             for pending in self.pending_prefix_writebacks.values()
@@ -79,6 +105,7 @@ class Scheduler:
         }
 
     def _pending_writeback_hashes(self) -> set[int]:
+        # 用 hash 去重：同一个 prefix 已经在写回队列里时，不再重复提交 D2H。
         return {
             h
             for pending in self.pending_prefix_writebacks.values()
@@ -86,6 +113,8 @@ class Scheduler:
         }
 
     def _mark_pending_writeback_release(self, block_ids: list[int]):
+        # request finish/preempt 时，如果某些 block 还在 D2H pending，
+        # 不能立刻 release；只把 pending 记录标成“完成后再释放”。
         block_id_set = set(block_ids)
         for pending in self.pending_prefix_writebacks.values():
             if any(block_id in block_id_set for _h, block_id, _tokens in pending["entries"]):
@@ -96,10 +125,27 @@ class Scheduler:
         # decode 阶段新产生的 KV 暂不进入 prefix cache，因此抢占时只需要重算最后一个未满 block。
         return seq.num_cached_tokens % self.block_size
 
-    def _start_prefix_writeback(self, seq: Sequence, release_on_complete: bool):
-        if not self.enable_cpu_kv_offload or seq.prefix_writeback_started:
-            return
+    def _submit_prefix_writeback_entries(self, entries, release_on_complete: bool, lazy: bool = False) -> int:
+        if not entries:
+            return 0
         assert self.writeback_prefix_blocks is not None
+        # pending block 仍可被当前 request 使用或后续 GPU hit，但不能被 LRU victim 覆盖。
+        self.block_manager.mark_cpu_writeback_pending(entries)
+        writeback_ids = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
+        for writeback_id, entry in zip(writeback_ids, entries):
+            self.pending_prefix_writebacks[writeback_id] = {
+                "entries": [entry],
+                "release_on_complete": release_on_complete,
+                "lazy": lazy,
+            }
+        self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
+        return len(writeback_ids)
+
+    def _start_eager_prefix_writeback(self, seq: Sequence, release_on_complete: bool):
+        # V1/V2 专用入口：按 request 粒度 eager 备份完整 prompt prefix。
+        # V3 lazy 模式不会走这里，因为它不想让 active request 无脑占一份 CPU backing。
+        if not self.enable_cpu_kv_offload or seq.eager_prefix_writeback_done:
+            return
         entries = self.block_manager.prefix_entries(seq)
         pending_hashes = self._pending_writeback_hashes()
         entries = [
@@ -108,26 +154,41 @@ class Scheduler:
             if h not in pending_hashes and not self.block_manager.has_cpu_block(h, tokens)
         ]
         if not entries:
-            seq.prefix_writeback_started = True
+            seq.eager_prefix_writeback_done = True
             return
-        # 主动写回：prompt prefill 一完成，就把完整 prefix blocks 异步 D2H 到 CPU。
-        # decode 新产生的 tokens 暂时不纳入 prefix cache；后续请求重新 prefill 后再进入 cache。
-        # 写回前会去重：CPU 已有或正在 pending writeback 的 prefix block 不再重复 D2H。
-        writeback_ids = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
-        for writeback_id, entry in zip(writeback_ids, entries):
-            self.pending_prefix_writebacks[writeback_id] = {
-                "entries": [entry],
-                "release_on_complete": release_on_complete,
-            }
-        seq.prefix_writeback_started = True
-        self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
+        # V1/V2 eager writeback：prefill 完成后立刻把完整 prefix 异步 D2H 到 CPU。
+        # V3 lazy writeback 会跳过这里，只在 inactive 安全窗口不足时选择性写回。
+        self._submit_prefix_writeback_entries(entries, release_on_complete, lazy=False)
+        seq.eager_prefix_writeback_done = True
+
+    def _maintain_lazy_writeback_window(self):
+        # V3 专用入口：按 cache 压力维护 inactive LRU 的 CPU-backed victim 窗口。
+        # 和 eager 入口不同，这里不接收 seq，也不按 request 全量写回。
+        if not self.enable_lazy_cpu_kv_writeback:
+            return
+        # V3 的触发点只放在 schedule()：每轮调度/分配结束后，
+        # 看 inactive LRU 的“安全 victim 窗口”是否不足。
+        # postprocess() 只负责把完成的 request 释放进 inactive，不在关键路径上逐请求写回。
+        entries = self.block_manager.select_lazy_writeback_entries(
+            self.lazy_writeback_target_blocks,
+            self._pending_writeback_hashes(),
+        )
+        # lazy writeback 的 block 已经 inactive，所以 release_on_complete=False；
+        # D2H 完成后只是把它标成 CPU-backed victim，不需要再释放 request 引用。
+        self._submit_prefix_writeback_entries(entries, release_on_complete=False, lazy=True)
 
     # 回收一下写完的 prefix blocks，用于后续使用。wait=True 时阻塞等待
     def _poll_prefix_writebacks(self, wait: bool = False):
         if not self.enable_cpu_kv_offload or not self.pending_prefix_writebacks:
             return
         assert self.poll_prefix_writebacks is not None
-        completed_ids = self.poll_prefix_writebacks(wait)
+        poll_result = self.poll_prefix_writebacks(wait)
+        if isinstance(poll_result, dict):
+            completed_ids = poll_result["completed_ids"]
+            evicted_hashes = poll_result.get("evicted_hashes", [])
+        else:
+            completed_ids = poll_result
+            evicted_hashes = []
         for writeback_id in completed_ids:
             pending = self.pending_prefix_writebacks.pop(writeback_id)
             entries = pending["entries"]
@@ -135,8 +196,13 @@ class Scheduler:
             # 如果 request 仍在 decode，GPU block 继续归该 request 使用；
             # 如果 request 已 finish/preempt 并跳过释放，则这里再真正 release。
             self.block_manager.register_cpu_blocks(entries)
+            if pending.get("lazy", False):
+                self.metrics["lazy_writeback_completed_block_count"] += len(entries)
             if pending["release_on_complete"]:
                 self.block_manager.release_blocks([block_id for _h, block_id, _tokens in entries])
+        if evicted_hashes:
+            self.block_manager.unregister_cpu_blocks(evicted_hashes)
+            self.metrics["cpu_prefix_cache_evicted_metadata_count"] += len(evicted_hashes)
         self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
 
     def is_finished(self):
@@ -216,6 +282,9 @@ class Scheduler:
             scheduled_seqs.append(seq)
 
         if scheduled_seqs:
+            # 一轮 prefill allocation 已经完成，此时再检查是否需要补足 inactive CPU-backed victim 窗口。
+            # 这样 lazy writeback 与调度 step 对齐，而不是和单个 request 的 finish 事件绑定。
+            self._maintain_lazy_writeback_window()
             return scheduled_seqs, True         # 优先做prefill，且只做prefill
 
         # decode
@@ -238,6 +307,9 @@ class Scheduler:
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))   # 重新插入队头，保证纯粹的FCFS
+        # decode 可能刚跨 block 边界并消耗了 free/inactive 容量，
+        # 所以 decode step 后也做一次窗口检查。
+        self._maintain_lazy_writeback_window()
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):
@@ -270,16 +342,26 @@ class Scheduler:
             seq.num_scheduled_tokens = 0
             prefill_finished = is_prefill and seq.num_cached_tokens == seq.num_tokens
             if prefill_finished:
-                self._start_prefix_writeback(seq, release_on_complete=False)
+                if self.enable_lazy_cpu_kv_writeback:
+                    # V3：prefill 完不立刻全量备份。此时 request 还要 decode，
+                    # prefix blocks 仍是 active；等 finish/preempt 释放到 inactive 后，
+                    # schedule() 里的 lazy 窗口才会从 LRU victim 侧选择一部分写回。
+                    seq.eager_prefix_writeback_done = True
+                else:
+                    # V1/V2：prefill 完后立即按 request eager 备份完整 prefix。
+                    self._start_eager_prefix_writeback(seq, release_on_complete=False)
             if is_prefill and seq.num_cached_tokens < seq.num_tokens:
                 continue
             seq.append_token(token_id)
             if (not seq.ignore_eos and token_id == self.eos) or seq.num_completion_tokens == seq.max_tokens:
                 seq.status = SequenceStatus.FINISHED
                 if self.enable_cpu_kv_offload:
-                    # 正常情况下 prefix 已在 prefill_finished 时启动 writeback。
-                    # 如果 prompt 太短或早停导致还没启动，则在 finish 时补一次，并让完成后释放 block。
-                    self._start_prefix_writeback(seq, release_on_complete=True)
+                    # V1/V2 在 prefill_finished 时已经 eager writeback。V3 lazy 模式下，
+                    # finish 只把完整 prefix 释放到 inactive LRU；是否写回 CPU 交给下一轮 schedule 统一检查。
+                    if not self.enable_lazy_cpu_kv_writeback:
+                        # prompt 很短或 finish 时 eager 还没提交过，就补一次；
+                        # request 已结束，所以 pending D2H 完成后可以顺手 release。
+                        self._start_eager_prefix_writeback(seq, release_on_complete=True)
                     self._mark_pending_writeback_release(seq.block_table)
                 protected = self._pending_writeback_block_ids() if self.enable_cpu_kv_offload else set()
                 # 已完成写回的 block 可以释放；仍在 D2H 的 block 继续 protected，后续 poll 完成后再释放。
@@ -287,6 +369,7 @@ class Scheduler:
                 self.running.remove(seq)
 
 
-# TODO(V3): 调度感知预取可以放在 Scheduler.schedule() 的 prefill/decode 决策之后。
-# 目标是 inspect waiting/running 队列，优先 prefetch 即将运行的 CPU-resident prefix；
-# 如果 GPU KV 空间不足，victim 可以用 OPT-style 策略选择当前窗口内最晚再访问的 prefix。
+# TODO(V3 scheduler-aware prefetch): 未来可以在 schedule() 完成当前 step 决策后，
+# inspect waiting/running 队列，预取即将运行的 CPU-resident prefix。
+# 那时 sync_swapin 指标应只统计“GPU miss + CPU hit 且预取没赶上、仍在关键路径同步 H2D”的情况，
+# 同时记录 prefetch false positive/false negative，判断调度感知是否取多或取少。

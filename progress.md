@@ -101,20 +101,89 @@ gpu_lru_cached_block_peak
 
 预期收益：相比 V1，V2 不是 overlap H2D，而是减少同步 swapin 次数、H2D bytes 和 H2D latency，同时提升 GPU prefix reuse。
 
-## V3 设计：调度感知 Prefetch / OPT
+## V3 设计：内存感知 Lazy Writeback
 
-调度感知预取推迟到 V3。V3 在 V2 LRU 的基础上 inspect waiting queue，预测即将访问的 CPU-resident prefix，并用 async H2D 提前恢复到 GPU。
+V3 在 V2 LRU 上只做一个优化：memory-aware selective writeback。
 
-V3 的指标口径需要区分 demand sync swapin 和 prefetch restore：`cpu_sync_swapin_*` 只统计关键路径上的 GPU miss + CPU hit + 同步 H2D；如果 prefetch 已经把 block 提前恢复到 GPU，后续 request 应计为 GPU hit，而不是 sync swapin。
+核心变化：不再 prefill 后全量写回 CPU，而是只给最可能被回收的 inactive GPU blocks 做 lazy D2H。动机是 CPU cache 也有限，V1/V2 的全量 backing 会让大量“GPU 上已经保留、短期不需要 CPU 副本”的 KV 占住 CPU 空间，反而挤掉更有价值的 prefix，甚至迫使它们被丢弃或下沉到更慢层级。V3 希望把 CPU 空间优先留给即将失去 GPU 副本、且未来仍可能复用的 KV，同时减少不必要的 PCIe D2H 流量。
 
-V3 还需要统计 prefetch 预测质量，避免只看 latency 看不出策略问题：
+Lazy writeback 的触发时机参考 vLLM simple CPU offload：每个 scheduler iteration 完成 scheduling/allocation 后，在 connector metadata 构建阶段统一检查一次，而不是某个 block 被 allocate 时立刻 D2H。
 
-- prefetch true positive：提前取回后被后续 request 实际命中的 block。
-- prefetch false positive：提前取回但在被淘汰前没有被使用的 block，即取多了。
-- prefetch false negative：request 到达关键路径时仍发生 CPU hit + 同步 H2D，本应提前取但没取到，即取少了。
-- prefetch useful tokens / wasted tokens：按 token 维度统计有效预取和浪费预取，便于和 H2D bytes、latency 对齐。
+```text
+scheduler step
+  -> allocation / scheduling
+  -> build_connector_meta(scheduler_output)
+  -> prepare_store_specs()
+  -> _prepare_lazy_store_specs()
+  -> 扫描 GPU inactive/free 队列前沿
+  -> 批量挑选 blocks 异步写回 CPU
+```
 
-V3 中 OPT/Oracle 的定位是评估上界：根据未来访问序列选择最晚再访问或不再访问的 inactive block 作为 victim。第一版 V3 不应为了 speculative prefetch 抢占 running request；preemption 只保留给 demand path。
+核心阈值也参考 vLLM，不写死固定 block 数，而是按单轮 scheduler step 可能新增的最大 KV blocks 估算 safety window：
+
+```text
+target_blocks = ceil(max_num_batched_tokens / block_size)
+target_free   = target_blocks * (1 + lazy_writeback_watermark_ratio)
+```
+
+vLLM 当前 lazy CPU offload 使用 `lazy_writeback_watermark_ratio = 1.0`，即大约保留 `2 * ceil(max_num_batched_tokens / block_size)` 个 already-backed inactive/free blocks。我们的场景里 `max_num_batched_tokens` 可能为了长 prompt 设得偏宽，直接用 `1.0` 会比较激进，容易提前复制过多 KV 到 CPU。因此 V3 不再只看单个默认值，而是把 watermark 当成实验变量。
+
+当 already-backed window 不足时，从 inactive LRU 的 eviction end 选择 GPU-only blocks，批量异步 D2H。这样 GPU 需要腾空间时，可以优先淘汰 already-backed blocks，避免在关键路径上同步 D2H；同时又不会像 V1/V2 那样把所有 prefix 都常驻 CPU。
+
+V3 block 状态：
+
+```text
+active GPU                -> running/waiting request 正在引用
+inactive GPU only         -> 可 GPU hit，但还没有 CPU backing
+inactive GPU + CPU backed -> 可 GPU hit，也可无痛 evict GPU
+pending writeback         -> D2H 未完成，暂时不能覆盖
+CPU only                  -> GPU miss 后可 demand restore
+dropped                   -> CPU/GPU 都没有，后续只能 recompute
+```
+
+需要新增配置：
+
+```text
+lazy_writeback_watermark_ratio = 0.5
+cpu_prefix_cache_gb_limit
+```
+
+后续扫描 `lazy_writeback_watermark_ratio = 0 / 0.25 / 0.5 / 1.0`。`0` 只覆盖一轮最大 allocation demand，`1.0` 对齐 vLLM 的 100% watermark；中间值用于观察 CPU 占用和同步 swapin 的折中。暂不把 `2.0` 作为主扫描点，除非需要专门验证更保守窗口对 sync swapin 的上限收益。
+
+关键指标：
+
+```text
+inactive_cpu_backed_block_count
+inactive_gpu_only_block_count
+victim_window_safe_or_pending_block_count
+lazy_writeback_scheduled/completed_block_count
+evict_already_backed_block_count
+evict_gpu_only_sync_writeback_block_count
+evict_gpu_only_drop_block_count
+cpu_cache_evicted_block_count
+cpu_prefix_kv_gb / cpu_prefix_kv_gb_peak
+```
+
+V3 的 benchmark 不只看速度，还要看 memory-latency tradeoff：在相同 cache pressure 下，扫描 `lazy_writeback_watermark_ratio` 和 `cpu_prefix_cache_gb_limit`，找到 CPU memory 明显低于 V2、但 sync swapin / TTFT / request latency 接近 V2 的参数区间。`cpu_prefix_cache_gb_limit = 0` 表示不限制 CPU cache，用作上界对照。
+
+专用脚本：
+
+```text
+scripts/run_v3_memory_sweep.sh
+```
+
+默认扫描 `watermark = 0 / 0.25 / 0.5 / 1.0` 和 `CPU limit = 3 / 5 / 7 / unlimited GB`。本轮不再做 document length sweep，优先固定 `document_length = 8192`；同时把 `target_working_set_gb` 和 `gpu_kv_cache_gb` 等比例放大到 `12.0 / 4.8`，保持 working set/GPU 约 `2.5x`、单 prompt/GPU 约 `24%`。这样 cache pressure 主要来自更多 documents，而不是少量超长 request。
+
+## V4 设计：调度感知 Prefetch / OPT Eviction
+
+V4 再引入 scheduler-aware 优化，不和 V3 的内存优化混在一个版本里。
+
+计划方向：
+
+- scheduler inspect waiting/running 队列，提前恢复即将使用的 CPU-resident prefix，尽量把 H2D restore 从关键路径移走。
+- eviction 从朴素 LRU 升级为近似 OPT：在当前可见调度窗口内，优先驱逐最晚才会再次访问、或不会再访问的 inactive block。
+- `sync_swapin` 指标只统计 GPU miss、CPU hit、且预取没赶上导致仍在关键路径同步 H2D 的情况；预取成功不计入 sync swapin。
+- 新增 prefetch accuracy 指标，例如 prefetch true positive、false positive、false negative，用于观察预取取多了还是取少了。
 
 ## Workload Cases
 
@@ -282,8 +351,9 @@ CPU 内存图使用 `cpu_prefix_kv_gb.mean`，即 2 次运行的最终 CPU prefi
 
 ## 下一步
 
-1. 后续主实验改成 cache pressure sweep：固定 `document_length`、`gpu_kv_cache_gb`、`query_length`、`output_len`、`max_num_seqs` 和 arrival rate，只调整 `num_documents`，扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
+1. 后续主实验改成 cache pressure sweep：固定 `document_length = 8192`、`gpu_kv_cache_gb`、`query_length`、`output_len`、`max_num_seqs` 和 arrival rate，只调整 `num_documents`，扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
 2. `document_length` 不作为主变量，只保留少量 8K/16K sensitivity 点，用来说明 prefix 越长时单次 miss/restore 成本更高。
 3. 继续保留 `case0_functional`、`cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing`，其中性能主张主要来自 hot/cold 和 branching；cascade 作为 LRU 无效边界 case。
 4. 下一轮如需补 recompute baseline，应在相同 Poisson arrival、`max_num_seqs=8`、`max_num_batched_tokens` 和 GPU KV 参数下重跑，避免和旧版拥塞口径混用。
-5. V3 再实现 scheduler-aware prefetch / OPT eviction oracle，并新增 prefetch true/false positive、false negative、useful/wasted tokens 指标。
+5. V3 聚焦 memory-aware selective/lazy writeback；重点扫描 `lazy_writeback_watermark_ratio` 与 `cpu_prefix_cache_gb_limit`，观察 CPU memory、sync swapin、recompute 和 TTFT 的权衡。
+6. V4 再做 scheduler-aware prefetch / OPT eviction，并补充 prefetch true/false positive、false negative 等准确性指标。

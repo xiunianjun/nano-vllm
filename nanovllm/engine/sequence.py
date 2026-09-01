@@ -26,9 +26,9 @@ class Sequence:
         self.num_scheduled_tokens = 0
         self.recompute_pending_tokens = 0
         self.num_preemptions = 0
-        # V1 prefix offload: prompt prefill 完成后只主动写回一次 CPU backing KV。
-        # decode 新产生的 tokens 暂时不进入 prefix cache，后续请求重新 prefill 后再纳入。
-        self.prefix_writeback_started = False
+        # V1/V2 eager offload：每个 request 的完整 prompt prefix 最多提交一次 D2H。
+        # V3 lazy 模式会把这个标记置 True，用来明确跳过 eager 路径。
+        self.eager_prefix_writeback_done = False
         self.is_prefill = True
         self.block_table = []
         self.temperature = sampling_params.temperature
@@ -82,14 +82,14 @@ class Sequence:
 
     def __getstate__(self):
         last_state = self.last_token if not self.is_prefill else self.token_ids
-        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.prefix_writeback_started, self.block_table, last_state)
+        return (self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.eager_prefix_writeback_done, self.block_table, last_state)
 
     def __setstate__(self, state):
         if len(state) == 8:
             self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.block_table, last_state = state
-            self.prefix_writeback_started = False
+            self.eager_prefix_writeback_done = False
         else:
-            self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.prefix_writeback_started, self.block_table, last_state = state
+            self.num_tokens, self.num_prompt_tokens, self.num_cached_tokens, self.num_scheduled_tokens, self.recompute_pending_tokens, self.num_preemptions, self.eager_prefix_writeback_done, self.block_table, last_state = state
         if isinstance(last_state, list):
             self.token_ids = last_state
             self.last_token = self.token_ids[-1]
