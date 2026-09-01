@@ -150,14 +150,15 @@ class ModelRunner:
 
 
     def reset_prefix_transfer_metrics(self):
+        cpu_kv_bytes = sum(entry["bytes"] for entry in self.cpu_prefix_cache.values())
         self.prefix_transfer_metrics = {
             # prefix-cache 主线指标：writeback 是完成请求后的主动 D2H，restore 是 CPU hit 后的同步 H2D。
             "cpu_prefix_writeback_count": 0,
             "cpu_prefix_restore_count": 0,
             "cpu_prefix_d2h_bytes": 0,
             "cpu_prefix_h2d_bytes": 0,
-            "cpu_prefix_kv_bytes": sum(entry["bytes"] for entry in self.cpu_prefix_cache.values()),
-            "cpu_prefix_kv_bytes_peak": 0,
+            "cpu_prefix_kv_bytes": cpu_kv_bytes,
+            "cpu_prefix_kv_bytes_peak": cpu_kv_bytes,
             "cpu_prefix_writeback_latency_sum": 0.0,
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
@@ -172,6 +173,12 @@ class ModelRunner:
 
     def get_prefix_transfer_metrics(self):
         metrics = dict(self.prefix_transfer_metrics)
+        current_cpu_kv_bytes = sum(entry["bytes"] for entry in self.cpu_prefix_cache.values())
+        metrics["cpu_prefix_kv_bytes"] = current_cpu_kv_bytes
+        metrics["cpu_prefix_kv_bytes_peak"] = max(metrics["cpu_prefix_kv_bytes_peak"], current_cpu_kv_bytes)
+        metrics["cpu_prefix_kv_gb"] = current_cpu_kv_bytes / (1024 ** 3)
+        metrics["cpu_prefix_kv_gb_peak"] = metrics["cpu_prefix_kv_bytes_peak"] / (1024 ** 3)
+        metrics["cpu_prefix_cache_block_count"] = len(self.cpu_prefix_cache)
         writeback_count = metrics["cpu_prefix_writeback_count"]
         restore_count = metrics["cpu_prefix_restore_count"]
         # CUDA event 记录的是整批 block copy 的时间，这里按批次求平均。
