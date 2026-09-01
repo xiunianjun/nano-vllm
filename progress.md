@@ -125,6 +125,7 @@ V3 中 OPT/Oracle 的定位是评估上界：根据未来访问序列选择最�
 | `case0_functional` | 单文档功能性校验 | 同一 document 做两次 QA，第二次应命中 GPU prefix cache |
 | `cascade_tile` | 级联污染 / cache thrashing sanity | warmup `D0,D1,...`，query 再从 `D0` 开始；working set 大于 GPU cache 时容易连续 miss |
 | `hot_cold_sharing` | 冷热 document prefix sharing | hot documents 高频访问，cold documents 低频访问；同时出现 GPU hit 和 GPU miss |
+| `branching_prefix_sharing` | 分叉 request 部分共享 | 多个 branch 共享同一个 root prefix，同时各自有不同 branch suffix |
 
 ## V2 Benchmark 参数原则
 
@@ -181,84 +182,108 @@ working_set_KV ~= num_documents * reusable_prefix_length * kv_bytes_per_token
 
 ## 实验结果
 
-### V2 LRU Moderate Benchmark
+### V2 LRU Doc Length Sweep
 
 本轮结果目录：
 
 ```text
-exp/v2_lru_vs_recompute_20260831_193542/
+exp/cpu_kv_memory_doclen_sweep_20260901_095444/
 ```
 
-目的：在较合理的 serving 参数下重新比较 recompute baseline、V1 CPU offload、V2 GPU LRU retention。配置使用 Poisson arrival、`max_num_seqs=8`、`max_num_batched_tokens=16768`，并把单请求 KV 占比控制到约 `0.29`，总 reusable working set 约为 GPU KV 的 `3.14x`。
+目的：在 serving-style Poisson arrival 下，比较 V1 CPU offload 与 V2 GPU LRU retention，并补充 CPU prefix cache 内存占用。按照你的要求，本轮跑完 16K 后停止；这轮不包含 recompute baseline，主要看 `V2 vs V1`。
+
+定位更新：这轮 doc length sweep 更适合作为 prefix length sensitivity / sanity，不再作为后续主实验变量。后续主实验应固定 document length 和 GPU KV budget，通过改变 `working_set_KV / GPU_KV` 来扫描 cache pressure。
+
+基础配置：
 
 ```text
 model = /data/datasets/models-hf/Qwen3-8B
-runs = 3
-document_length = 4096
+runs = 2
+document_length = 4096 / 8192 / 16384
 query_length = 96
 output_len = 16
-gpu_kv_cache_gb_requested = 2.0
-gpu_kv_cache_gb_actual = 1.96875
-target_working_set_gb = 6.0
-request_rate = 1.0 req/s
-single_prompt_KV / GPU_KV = 0.294
-working_set_KV / GPU_KV = 3.143
+gpu_kv_cache_gb_requested = 24
+max_num_seqs = 8
+request_rate = 2 req/s
+arrival_mode = poisson
 ```
 
-模式定义：
-
-```text
-baseline = GPU-only prefix cache；GPU miss 后 recompute document prefix
-V1       = CPU offload；request 结束后不保留 inactive GPU LRU，GPU miss 后同步 H2D restore
-V2       = CPU offload + inactive GPU LRU retention；优先 GPU LRU hit，miss 才同步 H2D restore
-```
-
-核心结果均为 3 次运行均值。`prefill total` 是 measured 阶段所有 prefill step 的总 wall time；`prefill avg/step` 是单个 prefill step 平均值；`TTFT/request/queueing` 是 measured requests 的分布统计。
+`max_num_batched_tokens` 随输入长度放大：4K/8K 使用 `33152`，16K 使用 `65920`，约等于一次允许 4 个长 prompt 的 prefill batch。
 
 图表：
 
-![V1 vs baseline latency speedup](exp/v2_lru_vs_recompute_20260831_193542/figures/v1_vs_baseline_latency_speedup.svg)
+![V2 vs V1 swapin reduction](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/v2_vs_v1_swapin_reduction.svg)
 
-![V1 vs baseline token accounting](exp/v2_lru_vs_recompute_20260831_193542/figures/v1_vs_baseline_tokens.svg)
+![V2 vs V1 latency speedup by doc length](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/v2_vs_v1_latency_speedup_doclen.svg)
 
-![V2 vs V1 latency speedup](exp/v2_lru_vs_recompute_20260831_193542/figures/v2_vs_v1_latency_speedup.svg)
+![CPU prefix KV memory by doc length](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/cpu_prefix_kv_memory_doclen.svg)
 
-![V2 vs V1 swapin and LRU hits](exp/v2_lru_vs_recompute_20260831_193542/figures/v2_vs_v1_swapin_lru_tokens.svg)
+CPU 内存图使用 `cpu_prefix_kv_gb.mean`，即 2 次运行的最终 CPU prefix cache 占用均值。当前实现 measured 阶段不释放 CPU backing，因此该值基本也等同于 `cpu_prefix_kv_gb_peak.mean`，不是时间平均内存。
 
-| case | mode | docs | reqs | prefill total | prefill avg/step | TTFT median/min/max | request median | queue avg/max | recompute tokens | sync swapin req/tokens | GPU LRU hit tokens |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| case0 | baseline | 1 | 1 | 0.048s | 0.048s | 0.075/0.075/0.075s | 0.448s | 0.0000/0.000s | 0 | 0/0 | 4096 |
-| case0 | V1 | 1 | 1 | 0.060s | 0.060s | 0.088/0.088/0.088s | 0.464s | 0.0000/0.000s | 0 | 1/4096 | 0 |
-| case0 | V2 | 1 | 1 | 0.053s | 0.053s | 0.083/0.083/0.083s | 0.497s | 0.0000/0.000s | 0 | 0/0 | 4096 |
-| cascade | baseline | 11 | 11 | 1.317s | 0.124s | 0.155/0.147/0.396s | 0.599s | 0.0148/0.088s | 45056 | 0/0 | 0 |
-| cascade | V1 | 11 | 11 | 0.526s | 0.050s | 0.082/0.072/0.121s | 0.517s | 0.0062/0.030s | 0 | 11/45056 | 0 |
-| cascade | V2 | 11 | 11 | 0.513s | 0.047s | 0.075/0.072/0.113s | 0.484s | 0.0063/0.028s | 0 | 11/45056 | 0 |
-| hot/cold | baseline | 11 | 44 | 2.966s | 0.068s | 0.094/0.060/0.297s | 0.522s | 0.0102/0.103s | 70656 | 0/0 | 97280 |
-| hot/cold | V1 | 11 | 44 | 1.997s | 0.045s | 0.075/0.068/0.144s | 0.468s | 0.0063/0.041s | 0 | 41/167936 | 0 |
-| hot/cold | V2 | 11 | 44 | 1.762s | 0.040s | 0.074/0.062/0.141s | 0.477s | 0.0063/0.033s | 0 | 20/70656 | 97280 |
-| branching | baseline | 21 | 84 | 3.561s | 0.042s | 0.067/0.060/0.147s | 0.460s | 0.0047/0.030s | 37717 | 0/0 | 249685 |
-| branching | V1 | 21 | 84 | 3.678s | 0.044s | 0.074/0.067/0.138s | 0.451s | 0.0058/0.037s | 0 | 80/286720 | 0 |
-| branching | V2 | 21 | 84 | 2.997s | 0.036s | 0.066/0.061/0.126s | 0.449s | 0.0049/0.029s | 0 | 20/37717 | 250368 |
+参数检查：
 
-| case | V1 prefill vs baseline | V2 prefill vs baseline | V2 prefill vs V1 | V2 TTFT vs V1 | V2 request median vs V1 | V2 swapin token reduction vs V1 |
-|---|---:|---:|---:|---:|---:|---:|
-| case0 | 0.79x | 0.89x | 1.13x | 1.05x | 0.93x | 100.0% |
-| cascade | 2.50x | 2.57x | 1.03x | 1.09x | 1.07x | 0.0% |
-| hot/cold | 1.49x | 1.68x | 1.13x | 1.02x | 0.98x | 57.9% |
-| branching | 0.97x | 1.19x | 1.23x | 1.13x | 1.01x | 86.8% |
+| doc | case | docs/branches | CPU KV GB | WS/GPU | single prompt GB | single/GPU | fit count |
+|---:|---|---:|---:|---:|---:|---:|---:|
+| 4096 | case0 | 1 | 0.562 | 0.02 | 0.578 | 2.4% | 41 |
+| 4096 | cascade | 43 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
+| 4096 | hot/cold | 43 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
+| 4096 | branching | 85 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
+| 8192 | case0 | 1 | 1.125 | 0.05 | 1.140 | 4.8% | 21 |
+| 8192 | cascade | 29 | 32.625 | 1.36 | 1.140 | 4.8% | 21 |
+| 8192 | hot/cold | 29 | 32.625 | 1.36 | 1.140 | 4.8% | 21 |
+| 8192 | branching | 56 | 32.062 | 1.34 | 1.140 | 4.8% | 21 |
+| 16384 | case0 | 1 | 2.250 | 0.09 | 2.265 | 9.4% | 10 |
+| 16384 | cascade | 22 | 49.500 | 2.06 | 2.265 | 9.4% | 10 |
+| 16384 | hot/cold | 22 | 49.500 | 2.06 | 2.265 | 9.4% | 10 |
+| 16384 | branching | 42 | 48.375 | 2.02 | 2.265 | 9.4% | 10 |
+
+结论：8K/16K 的所有 case 都没有靠“单个 request 塞满 HBM”制造压力。16K 单 prompt 约 2.27GB，只占 24GB GPU KV 的 9.4%，估算可同时容纳约 10 个完整 prompt；cache pressure 主要来自更多 documents/branches 形成的总 working set。
+
+核心结果均为 2 次运行均值。TTFT/request/queueing 是 measured requests 的 per-request 分布统计；`prefill total` 是 measured 阶段所有 prefill step 的总 wall time。
+
+| doc | case | V1 swapin req/tok | V2 swapin req/tok | swapin token drop | V2 LRU hit tok | V1 TTFT avg/med/min | V2 TTFT avg/med/min | V1 req avg/med | V2 req avg/med |
+|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| 4096 | case0 | 1.0/4096 | 0.0/0 | 100.0% | 4096 | 0.101/0.101/0.101 | 0.076/0.076/0.076 | 0.537/0.537 | 0.451/0.451 |
+| 4096 | cascade | 43.0/176128 | 43.0/94208 | 46.5% | 81920 | 0.091/0.087/0.073 | 0.086/0.082/0.066 | 0.521/0.510 | 0.520/0.512 |
+| 4096 | hot/cold | 145.0/593920 | 2.0/8192 | 98.6% | 585728 | 0.089/0.085/0.064 | 0.079/0.074/0.061 | 0.520/0.509 | 0.523/0.502 |
+| 4096 | branching | 283.0/871424 | 7.0/14336 | 98.4% | 858112 | 0.083/0.077/0.062 | 0.075/0.070/0.060 | 0.503/0.498 | 0.502/0.489 |
+| 8192 | case0 | 1.0/8192 | 0.0/0 | 100.0% | 8192 | 0.101/0.101/0.101 | 0.076/0.076/0.076 | 0.476/0.476 | 0.450/0.450 |
+| 8192 | cascade | 29.0/237568 | 29.0/237568 | 0.0% | 0 | 0.162/0.158/0.090 | 0.122/0.107/0.087 | 0.872/0.832 | 0.567/0.550 |
+| 8192 | hot/cold | 95.0/778240 | 13.0/106496 | 86.3% | 667648 | 0.107/0.098/0.064 | 0.089/0.079/0.061 | 0.575/0.548 | 0.578/0.508 |
+| 8192 | branching | 179.5/1091584 | 16.0/63616 | 94.2% | 1036160 | 0.094/0.088/0.063 | 0.078/0.073/0.060 | 0.522/0.519 | 0.513/0.494 |
+| 16384 | case0 | 1.0/16384 | 0.0/0 | 100.0% | 16384 | 0.128/0.128/0.128 | 0.077/0.077/0.077 | 0.505/0.505 | 0.456/0.456 |
+| 16384 | cascade | 22.0/360448 | 22.0/360448 | 0.0% | 0 | 0.205/0.179/0.145 | 0.249/0.232/0.146 | 0.895/0.917 | 1.264/1.074 |
+| 16384 | hot/cold | 71.0/1163264 | 20.0/307840 | 73.5% | 920960 | 0.152/0.139/0.074 | 0.100/0.081/0.061 | 0.756/0.756 | 0.578/0.511 |
+| 16384 | branching | 131.0/1585152 | 19.0/154240 | 90.3% | 1516928 | 0.119/0.114/0.063 | 0.079/0.074/0.061 | 0.590/0.550 | 0.501/0.499 |
+
+| doc | case | V1 prefill total | V2 prefill total | speedup | V1 queue avg/max | V2 queue avg/max |
+|---:|---|---:|---:|---:|---:|---:|
+| 4096 | case0 | 0.069s | 0.048s | 1.43x | 0.000/0.000s | 0.000/0.000s |
+| 4096 | cascade | 1.938s | 1.728s | 1.12x | 0.010/0.045s | 0.011/0.039s |
+| 4096 | hot/cold | 7.541s | 6.031s | 1.25x | 0.011/0.045s | 0.010/0.049s |
+| 4096 | branching | 13.884s | 11.510s | 1.21x | 0.010/0.049s | 0.009/0.043s |
+| 8192 | case0 | 0.074s | 0.049s | 1.52x | 0.000/0.000s | 0.000/0.000s |
+| 8192 | cascade | 2.203s | 1.782s | 1.24x | 0.022/0.089s | 0.015/0.072s |
+| 8192 | hot/cold | 6.579s | 4.679s | 1.41x | 0.012/0.065s | 0.012/0.056s |
+| 8192 | branching | 10.785s | 7.828s | 1.38x | 0.011/0.056s | 0.010/0.040s |
+| 16384 | case0 | 0.100s | 0.050s | 2.02x | 0.000/0.000s | 0.000/0.000s |
+| 16384 | cascade | 2.141s | 2.420s | 0.88x | 0.028/0.082s | 0.033/0.100s |
+| 16384 | hot/cold | 7.432s | 4.319s | 1.72x | 0.016/0.089s | 0.012/0.094s |
+| 16384 | branching | 10.865s | 6.109s | 1.78x | 0.014/0.087s | 0.010/0.043s |
 
 观察：
 
-- `case0` 是功能性校验：baseline/V2 直接 GPU hit；V1 因为禁用了 inactive GPU LRU，会走一次 CPU restore。单请求场景不用于判断总体性能。
-- `cascade` 是级联污染 case：measured 顺序从 `D0` 开始，working set 又明显大于 GPU KV，所以 V2 没有 LRU hit，表现接近 V1。这说明 LRU 不能解决纯 tile thrashing，只能把 recompute 变成 restore。
-- `hot/cold` 是 V2 的主要目标场景：V2 保留了 baseline 中可命中的 hot prefix，GPU LRU hit 为 `97280` tokens；相比 V1，同步 swapin 从 `41` 次降到 `20` 次，swapin tokens 降低 `57.9%`。
-- `branching` 中存在大量 root/branch 部分共享。V2 恢复了 baseline 级别的 GPU reuse，并把 V1 的同步 swapin 从 `80` 次降到 `20` 次，swapin tokens 降低 `86.8%`。
-- queueing latency 这轮整体较低，说明当前配置基本对齐 serving-style Poisson arrival，而不是旧版一次性批量提交造成的大排队。
-- request median/TTFT 的提升比 prefill total 小：输出 decode 仍占 request latency 大头，且 V2 当前没有做 H2D overlap/prefetch，只是减少同步 restore 的次数。
+- V2 不降低 CPU prefix cache 容量需求；CPU KV GB 基本等于 unique reusable prefix working set。V2 的收益来自把一部分 V1 的关键路径同步 H2D restore 变成 GPU inactive LRU hit。
+- document length 越长，单个 prefix 占用的 GPU KV 越大，LRU 能同时保留的完整历史 prefix 数量越少。当前 24GB GPU KV 下，4K/8K/16K 单 prompt 约为 `0.58/1.14/2.27GB`，估算可容纳完整 prompt 数从 `41 -> 21 -> 10` 下降，所以长 prefix 下 swapin token reduction 变小是预期现象。
+- `hot/cold` 和 `branching` 是 V2 的主目标场景。随着 prefix 拉长到 16K，V2 仍能把同步 swapin tokens 分别降低 `73.5%` 和 `90.3%`。
+- `cascade` 是边界 case：8K/16K 下 V2 LRU hit 为 0，说明纯顺序 tile/thrashing 访问没有 temporal locality，朴素 LRU 解决不了；这个 case 更适合保留为 sanity / stress，而不是证明 V2 收益。
+- queueing latency 整体较低，说明这轮不是旧版一次性批量提交造成的大排队。TTFT 的改善主要来自减少关键路径 restore；request latency 改善较小，因为短输出 decode 仍占相当比例。
+- 4K 的 working set 约等于 GPU KV，压力偏轻；8K/16K 的 working set/GPU 分别约 `1.34-1.36x` 和 `2.02-2.06x`，更适合作为后续主结果。
 
 ## 下一步
 
-1. 把 `moderate_lru` 固化成脚本 profile，并补一个 `serving_concurrency` profile：`gpu_kv_cache_gb≈4.0`、`target_working_set_gb≈12.0`、`request_rate` 做 sweep。
-2. 在 V2 上做更长 prefix sweep，优先保留 `document_length >= 4096`，主 case 使用 `cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing`。
-3. 继续观察同步 swapin request/block/token、LRU hit token、LRU eviction、GPU inactive cache occupancy；核心结论优先看 V2 相对 V1 的 swapin reduction。
-4. V3 再实现 scheduler-aware prefetch / OPT eviction oracle，用于评估调度与 cache 协同的额外收益。
+1. 后续主实验改成 cache pressure sweep：固定 `document_length`、`gpu_kv_cache_gb`、`query_length`、`output_len`、`max_num_seqs` 和 arrival rate，只调整 `num_documents`，扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
+2. `document_length` 不作为主变量，只保留少量 8K/16K sensitivity 点，用来说明 prefix 越长时单次 miss/restore 成本更高。
+3. 继续保留 `case0_functional`、`cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing`，其中性能主张主要来自 hot/cold 和 branching；cascade 作为 LRU 无效边界 case。
+4. 下一轮如需补 recompute baseline，应在相同 Poisson arrival、`max_num_seqs=8`、`max_num_batched_tokens` 和 GPU KV 参数下重跑，避免和旧版拥塞口径混用。
+5. V3 再实现 scheduler-aware prefetch / OPT eviction oracle，并新增 prefetch true/false positive、false negative、useful/wasted tokens 指标。

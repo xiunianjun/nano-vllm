@@ -150,6 +150,8 @@ venv.bak/
 /exp/smoke_*/
 /exp/*smoke_*/
 /exp/doclen_sweep_v1_vs_recompute_20260829_113423/
+/exp/cpu_kv_memory_doclen_sweep_20260901_095156/
+/exp/prefix_cache_serving_20260901_094857/
 /exp/doclen_sweep_v1_vs_recompute_20260830_092132/
 /exp/doclen_sweep_v1_vs_recompute_queue_20260830_100635/
 /exp/doclen_sweep_serving_poisson_*/
