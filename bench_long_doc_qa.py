@@ -35,6 +35,12 @@ def parse_args():
     parser.add_argument("--warmup-mode", choices=("all_docs", "stream", "none"), default="stream")
     parser.add_argument("--stream-warmup-ratio", type=float, default=0.3)
     parser.add_argument("--request-rate", type=float, default=None, help="Poisson arrival rate in requests/sec.")
+    parser.add_argument(
+        "--arrival-burst-size",
+        type=int,
+        default=1,
+        help="Requests per Poisson arrival. The request rate remains requests/sec; 1 preserves the original trace semantics.",
+    )
     parser.add_argument("--arrival-seed", type=int, default=0)
     parser.add_argument("--shuffle-seed", type=int, default=0)
     parser.add_argument("--hot-documents", type=int, default=2)
@@ -175,22 +181,40 @@ def run_round(llm, prompts, sampling_params, use_tqdm):
     return elapsed, llm.request_latencies[before:], outputs
 
 
-def poisson_arrival_offsets(num_requests, request_rate, seed):
+def poisson_arrival_offsets(num_requests, request_rate, seed, burst_size=1):
     if request_rate is None or request_rate <= 0:
         raise ValueError("--request-rate must be positive when --arrival-mode=poisson")
+    if burst_size <= 0:
+        raise ValueError("--arrival-burst-size must be positive")
     rng = random.Random(seed)
     offsets = []
     t = 0.0
-    for i in range(num_requests):
-        if i > 0:
-            t += rng.expovariate(request_rate)
-        offsets.append(t)
+    burst_rate = request_rate / burst_size
+    for burst_start in range(0, num_requests, burst_size):
+        if burst_start > 0:
+            t += rng.expovariate(burst_rate)
+        requests_in_burst = min(burst_size, num_requests - burst_start)
+        offsets.extend([t] * requests_in_burst)
     return offsets
 
 
-def run_poisson_round(llm, prompts, sampling_params, request_rate, seed):
+def realized_request_rate(arrival_offsets):
+    if len(arrival_offsets) <= 1:
+        return 0.0
+    arrival_span = arrival_offsets[-1] - arrival_offsets[0]
+    if not arrival_span:
+        return 0.0
+    first_arrival = arrival_offsets[0]
+    initial_burst_size = next(
+        (index for index, offset in enumerate(arrival_offsets) if offset != first_arrival),
+        len(arrival_offsets),
+    )
+    return (len(arrival_offsets) - initial_burst_size) / arrival_span
+
+
+def run_poisson_round(llm, prompts, sampling_params, request_rate, seed, burst_size=1):
     before = len(llm.request_latencies)
-    arrival_offsets = poisson_arrival_offsets(len(prompts), request_rate, seed)
+    arrival_offsets = poisson_arrival_offsets(len(prompts), request_rate, seed, burst_size)
     round_start = time.perf_counter()
     next_request = 0
     finished = 0
@@ -231,7 +255,8 @@ def run_poisson_round(llm, prompts, sampling_params, request_rate, seed):
         "arrival_offsets_sec": arrival_offsets,
         "planned_arrival_span_sec": arrival_span,
         "request_rate_target": request_rate,
-        "offered_rate_realized": (len(prompts) - 1) / arrival_span if arrival_span else 0.0,
+        "arrival_burst_size": burst_size,
+        "offered_rate_realized": realized_request_rate(arrival_offsets),
         "achieved_throughput": len(prompts) / elapsed if elapsed else 0.0,
         "continuous_warmup": False,
     }
@@ -242,11 +267,13 @@ def run_poisson_round(llm, prompts, sampling_params, request_rate, seed):
     return elapsed, llm.request_latencies[before:], outputs, metadata
 
 
-def run_continuous_poisson_round(llm, warmup_prompts, measured_prompts, sampling_params, request_rate, seed):
+def run_continuous_poisson_round(
+    llm, warmup_prompts, measured_prompts, sampling_params, request_rate, seed, burst_size=1
+):
     """Run warmup and measured requests on one Poisson timeline."""
     prompts = warmup_prompts + measured_prompts
     warmup_count = len(warmup_prompts)
-    offsets = poisson_arrival_offsets(len(prompts), request_rate, seed)
+    offsets = poisson_arrival_offsets(len(prompts), request_rate, seed, burst_size)
     round_start = time.perf_counter()
     measurement_start = None
     warmup_inflight_at_boundary = 0
@@ -310,7 +337,8 @@ def run_continuous_poisson_round(llm, warmup_prompts, measured_prompts, sampling
         "measured_arrival_offsets_sec": measured_offsets,
         "planned_arrival_span_sec": arrival_span,
         "request_rate_target": request_rate,
-        "offered_rate_realized": (len(measured_offsets) - 1) / arrival_span if arrival_span else 0.0,
+        "arrival_burst_size": burst_size,
+        "offered_rate_realized": realized_request_rate(measured_offsets),
         "achieved_throughput": len(measured_prompts) / measurement_elapsed if measurement_elapsed else 0.0,
         "warmup_inflight_at_measurement_start": warmup_inflight_at_boundary,
         "continuous_warmup": True,
@@ -388,6 +416,10 @@ def main():
         raise ValueError("--stream-warmup-ratio must be in [0, 1)")
     if args.arrival_mode == "poisson" and (args.request_rate is None or args.request_rate <= 0):
         raise ValueError("--request-rate must be positive when --arrival-mode=poisson")
+    if args.arrival_burst_size <= 0:
+        raise ValueError("--arrival-burst-size must be positive")
+    if args.arrival_mode != "poisson" and args.arrival_burst_size != 1:
+        raise ValueError("--arrival-burst-size is only supported when --arrival-mode=poisson")
     hf_config = AutoConfig.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     ids = choose_token_ids(tokenizer)
@@ -507,6 +539,7 @@ def main():
             sampling_params,
             args.request_rate,
             args.arrival_seed,
+            args.arrival_burst_size,
         )
     else:
         if warmup_prompts:
@@ -518,7 +551,12 @@ def main():
         llm.reset_metrics()
         if args.arrival_mode == "poisson":
             query_elapsed, query_latencies, query_outputs, arrival_metadata = run_poisson_round(
-                llm, measured_prompts, sampling_params, args.request_rate, args.arrival_seed
+                llm,
+                measured_prompts,
+                sampling_params,
+                args.request_rate,
+                args.arrival_seed,
+                args.arrival_burst_size,
             )
         else:
             query_elapsed, query_latencies, query_outputs = run_round(
@@ -528,6 +566,7 @@ def main():
                 "arrival_offsets_sec": [],
                 "planned_arrival_span_sec": 0.0,
                 "request_rate_target": None,
+                "arrival_burst_size": 1,
                 "offered_rate_realized": 0.0,
                 "achieved_throughput": len(measured_prompts) / query_elapsed if query_elapsed else 0.0,
                 "continuous_warmup": False,
@@ -584,6 +623,7 @@ def main():
         "stream_warmup_ratio": args.stream_warmup_ratio,
         "arrival_mode": args.arrival_mode,
         "request_rate_target": args.request_rate,
+        "arrival_burst_size": args.arrival_burst_size,
         "arrival_seed": args.arrival_seed,
         "hot_documents": args.hot_documents,
         "hot_request_ratio": args.hot_request_ratio,

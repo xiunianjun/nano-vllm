@@ -4,7 +4,7 @@ from types import SimpleNamespace
 
 import torch
 
-from bench_long_doc_qa import percentile, poisson_arrival_offsets, workload_profile
+from bench_long_doc_qa import percentile, poisson_arrival_offsets, realized_request_rate, workload_profile
 from nanovllm.config import KVCachePolicy
 from nanovllm.engine.block_manager import BlockManager
 from nanovllm.engine.sequence import Sequence
@@ -35,6 +35,29 @@ class BenchmarkHelperTests(unittest.TestCase):
         self.assertEqual(len(offsets), 100)
         self.assertEqual(offsets[0], 0.0)
         self.assertTrue(all(left < right for left, right in zip(offsets, offsets[1:])))
+
+    def test_default_poisson_trace_preserves_single_request_arrivals(self):
+        self.assertEqual(
+            poisson_arrival_offsets(10, 2.0, 9),
+            poisson_arrival_offsets(10, 2.0, 9, burst_size=1),
+        )
+
+    def test_poisson_burst_trace_groups_requests_and_handles_partial_tail(self):
+        offsets = poisson_arrival_offsets(10, 2.0, 9, burst_size=4)
+        self.assertEqual(len(offsets), 10)
+        self.assertEqual(offsets[:4], [0.0] * 4)
+        self.assertEqual(len(set(offsets[4:8])), 1)
+        self.assertEqual(len(set(offsets[8:])), 1)
+        self.assertLess(offsets[3], offsets[4])
+        self.assertLess(offsets[7], offsets[8])
+
+    def test_poisson_burst_rate_is_still_expressed_in_requests_per_second(self):
+        offsets = poisson_arrival_offsets(100_000, 2.0, 9, burst_size=4)
+        self.assertAlmostEqual(realized_request_rate(offsets), 2.0, delta=0.03)
+
+    def test_poisson_burst_size_must_be_positive(self):
+        with self.assertRaisesRegex(ValueError, "arrival-burst-size"):
+            poisson_arrival_offsets(10, 2.0, 9, burst_size=0)
 
     def test_realized_working_set_counts_only_touched_documents(self):
         args = SimpleNamespace(workload="long_doc_qa", document_length=128)
