@@ -76,6 +76,9 @@ class BlockManager:
         metrics["safe_allocatable_block_count"] = len(self.free_block_ids) + inactive_cpu_backed
         return metrics
 
+    def free_block_count(self) -> int:
+        return len(self.free_block_ids)
+
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
         h = xxhash.xxh64()
@@ -346,10 +349,12 @@ class BlockManager:
     def can_append(self, seq: Sequence) -> bool:
         return self._available_block_count() >= (len(seq) % self.block_size == 1)
 
-    def may_append(self, seq: Sequence):
+    def may_append(self, seq: Sequence) -> bool:
         if len(seq) % self.block_size == 1:
             # decode 跨 block 边界时才需要新 block；新 decode block 暂不算 prefix cache。
             seq.block_table.append(self._allocate_block())
+            return True
+        return False
 
     def hash_blocks(self, seq: Sequence):
         if not self.enable_prefix_cache:

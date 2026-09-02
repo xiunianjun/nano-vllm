@@ -26,6 +26,8 @@ class Config:
     lazy_writeback_watermark_ratio: float = 0.5
     # <= 0 表示不限制 CPU prefix cache；> 0 时按 LRU 淘汰 CPU backing，后续 miss 只能 recompute。
     cpu_prefix_cache_gb_limit: float = 0.0
+    # > 0 时预分配固定容量 pinned CPU KV block pool，避免 writeback 热路径临时 pin_memory 分配。
+    cpu_prefix_pool_gb: float = 0.0
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
@@ -33,5 +35,12 @@ class Config:
         assert 1 <= self.tensor_parallel_size <= 8
         assert self.lazy_writeback_watermark_ratio >= 0
         assert self.cpu_prefix_cache_gb_limit >= 0
+        assert self.cpu_prefix_pool_gb >= 0
+        if self.enable_cpu_kv_offload and self.cpu_prefix_cache_gb_limit > 0:
+            # A configured CPU cache limit is also a physical pinned-memory cap.
+            # Use a fixed pool so the writeback path cannot allocate beyond it.
+            if self.cpu_prefix_pool_gb == 0:
+                self.cpu_prefix_pool_gb = self.cpu_prefix_cache_gb_limit
+            assert self.cpu_prefix_pool_gb <= self.cpu_prefix_cache_gb_limit
         self.hf_config = AutoConfig.from_pretrained(self.model)
         self.max_model_len = min(self.max_model_len, self.hf_config.max_position_embeddings)

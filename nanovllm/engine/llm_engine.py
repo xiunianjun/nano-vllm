@@ -16,6 +16,17 @@ from nanovllm.engine.scheduler import Scheduler
 from nanovllm.engine.model_runner import ModelRunner
 
 
+def _percentile(values, quantile):
+    if not values:
+        return 0.0
+    ordered = sorted(values)
+    position = (len(ordered) - 1) * quantile
+    lower = int(position)
+    upper = min(lower + 1, len(ordered) - 1)
+    weight = position - lower
+    return ordered[lower] * (1.0 - weight) + ordered[upper] * weight
+
+
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
@@ -103,16 +114,22 @@ class LLMEngine:
             "request_latency_count": len(latencies),
             "request_latency_avg": sum(latencies) / len(latencies) if latencies else 0.0,
             "request_latency_median": statistics.median(latencies) if latencies else 0.0,
+            "request_latency_p90": _percentile(latencies, 0.90),
+            "request_latency_p99": _percentile(latencies, 0.99),
             "request_latency_max": max(latencies) if latencies else 0.0,
             "request_latency_min": min(latencies) if latencies else 0.0,
             "ttft_latency_count": len(ttft_latencies),
             "ttft_latency_avg": sum(ttft_latencies) / len(ttft_latencies) if ttft_latencies else 0.0,
             "ttft_latency_median": statistics.median(ttft_latencies) if ttft_latencies else 0.0,
+            "ttft_latency_p90": _percentile(ttft_latencies, 0.90),
+            "ttft_latency_p99": _percentile(ttft_latencies, 0.99),
             "ttft_latency_max": max(ttft_latencies) if ttft_latencies else 0.0,
             "ttft_latency_min": min(ttft_latencies) if ttft_latencies else 0.0,
             "queueing_latency_count": len(queueing_latencies),
             "queueing_latency_avg": sum(queueing_latencies) / len(queueing_latencies) if queueing_latencies else 0.0,
             "queueing_latency_median": statistics.median(queueing_latencies) if queueing_latencies else 0.0,
+            "queueing_latency_p90": _percentile(queueing_latencies, 0.90),
+            "queueing_latency_p99": _percentile(queueing_latencies, 0.99),
             "queueing_latency_max": max(queueing_latencies) if queueing_latencies else 0.0,
             "queueing_latency_min": min(queueing_latencies) if queueing_latencies else 0.0,
             "prefill_step_count": prefill_step_count,
@@ -145,7 +162,7 @@ class LLMEngine:
         self.step_metrics["schedule_time_sec"] += perf_counter() - schedule_start
         if is_prefill:
             for seq in seqs:
-                if seq.seq_id not in self.first_scheduled_recorded:
+                if seq.seq_id in self.request_start_times and seq.seq_id not in self.first_scheduled_recorded:
                     self.queueing_latencies.append(schedule_start - self.request_start_times[seq.seq_id])
                     self.first_scheduled_recorded.add(seq.seq_id)
         num_tokens = sum(seq.num_scheduled_tokens for seq in seqs) if is_prefill else -len(seqs)
@@ -155,12 +172,17 @@ class LLMEngine:
         t = perf_counter()
         self.scheduler.postprocess(seqs, token_ids, is_prefill)
         self.step_metrics["postprocess_time_sec"] += perf_counter() - t
-        if not is_prefill:
-            now = perf_counter()
-            for seq in seqs:
-                if seq.seq_id not in self.first_token_recorded and seq.num_completion_tokens >= 1:
-                    self.step_metrics["ttft_latencies"].append(now - self.request_start_times[seq.seq_id])
-                    self.first_token_recorded.add(seq.seq_id)
+        # Prefill postprocess already samples the first completion token. Record TTFT
+        # at that transition instead of waiting for an additional decode iteration.
+        now = perf_counter()
+        for seq in seqs:
+            if (
+                seq.seq_id in self.request_start_times
+                and seq.seq_id not in self.first_token_recorded
+                and seq.num_completion_tokens >= 1
+            ):
+                self.step_metrics["ttft_latencies"].append(now - self.request_start_times[seq.seq_id])
+                self.first_token_recorded.add(seq.seq_id)
         outputs = [(seq.seq_id, seq.completion_token_ids) for seq in seqs if seq.is_finished]
         return outputs, num_tokens
 
@@ -210,7 +232,9 @@ class LLMEngine:
             # seq_id: 请求编号；token_id: 词表编号
             for seq_id, token_ids in output:
                 outputs[seq_id] = token_ids # 拼接后结果
-                self.request_latencies.append(perf_counter() - self.request_start_times.pop(seq_id, t))
+                start_time = self.request_start_times.pop(seq_id, None)
+                if start_time is not None:
+                    self.request_latencies.append(perf_counter() - start_time)
                 if use_tqdm:
                     pbar.update(1)
         pbar.close()

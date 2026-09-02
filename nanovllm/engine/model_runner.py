@@ -33,6 +33,13 @@ class ModelRunner:
         # V3 可选 CPU cache cap。超过后按 CPU LRU 淘汰 backing tensor；
         # 被淘汰的 hash 会返回给 Scheduler/BlockManager 删除 CPU-hit metadata。
         self.cpu_prefix_cache_limit_bytes = int(config.cpu_prefix_cache_gb_limit * (1 << 30))
+        self.cpu_prefix_pool_limit_bytes = int(config.cpu_prefix_pool_gb * (1 << 30))
+        # pinned CPU pool 是 V3 的关键优化：把昂贵的 pin_memory 分配挪出 scheduler 热路径。
+        # free list 里的 tensor 没有有效 prefix；进入 cpu_prefix_cache 后才算 live backing。
+        self.cpu_prefix_pool_free_blocks = []
+        self.cpu_prefix_pool_reserved_bytes = 0
+        self.cpu_prefix_pool_reserved_block_count = 0
+        self.cpu_prefix_block_nbytes = 0
         # 异步 writeback 的完成状态由 CUDA event 标记，Scheduler 轮询完成后再释放 protected GPU block。
         self.pending_prefix_writebacks = []
         self.next_prefix_writeback_id = 0
@@ -48,6 +55,7 @@ class ModelRunner:
         self.sampler = Sampler()
         self.warmup_model()
         self.allocate_kv_cache()
+        self.allocate_cpu_prefix_pool()
         # 独立 copy stream 用于 D2H/H2D，给后续 compute/copy overlap 留出空间。
         self.copy_stream = torch.cuda.Stream()
         if not self.enforce_eager:
@@ -153,6 +161,54 @@ class ModelRunner:
                 layer_id += 1
 
 
+    def allocate_cpu_prefix_pool(self):
+        if self.cpu_prefix_pool_limit_bytes <= 0:
+            return
+        block_shape = self.kv_cache[:, :, 0].shape
+        block_dtype = self.kv_cache.dtype
+        self.cpu_prefix_block_nbytes = self.kv_cache[:, :, 0].numel() * self.kv_cache.element_size()
+        num_blocks = self.cpu_prefix_pool_limit_bytes // self.cpu_prefix_block_nbytes
+        for _ in range(num_blocks):
+            self.cpu_prefix_pool_free_blocks.append(
+                torch.empty(block_shape, dtype=block_dtype, device="cpu", pin_memory=True)
+            )
+        self.cpu_prefix_pool_reserved_block_count = len(self.cpu_prefix_pool_free_blocks)
+        self.cpu_prefix_pool_reserved_bytes = self.cpu_prefix_pool_reserved_block_count * self.cpu_prefix_block_nbytes
+
+    def _evict_one_cpu_prefix_cache_entry(self):
+        if not self.cpu_prefix_cache:
+            return None
+        h, entry = self.cpu_prefix_cache.popitem(last=False)
+        self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= entry["bytes"]
+        self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
+        self.prefix_transfer_metrics["cpu_prefix_cache_eviction_count"] += 1
+        self.prefix_transfer_metrics["cpu_prefix_cache_evicted_bytes"] += entry["bytes"]
+        self._release_cpu_prefix_block(entry)
+        return h
+
+    def _take_cpu_prefix_block(self, shape, dtype):
+        if self.cpu_prefix_pool_free_blocks:
+            self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
+            return self.cpu_prefix_pool_free_blocks.pop(), True, None
+        if self.cpu_prefix_pool_limit_bytes > 0:
+            self.prefix_transfer_metrics["cpu_prefix_pool_exhausted_count"] += 1
+            # A configured pool is a physical-memory hard cap. Reuse one LRU live
+            # block; if all pool blocks are pending, reject the writeback rather
+            # than silently allocating outside the advertised budget.
+            evicted_hash = self._evict_one_cpu_prefix_cache_entry()
+            if self.cpu_prefix_pool_free_blocks:
+                self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
+                return self.cpu_prefix_pool_free_blocks.pop(), True, evicted_hash
+            self.prefix_transfer_metrics["cpu_prefix_pool_writeback_rejected_count"] += 1
+            return None, False, evicted_hash
+        self.prefix_transfer_metrics["cpu_prefix_pool_on_demand_alloc_count"] += 1
+        return torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True), False, None
+
+    def _release_cpu_prefix_block(self, entry):
+        if entry.get("pooled", False):
+            self.cpu_prefix_pool_free_blocks.append(entry["block"])
+
+
     def reset_prefix_transfer_metrics(self):
         cpu_kv_bytes = sum(entry["bytes"] for entry in self.cpu_prefix_cache.values())
         self.prefix_transfer_metrics = {
@@ -161,14 +217,27 @@ class ModelRunner:
             "cpu_prefix_restore_count": 0,
             "cpu_prefix_d2h_bytes": 0,
             "cpu_prefix_h2d_bytes": 0,
+            # live bytes 才代表当前有效 CPU prefix backing；pool reserved 是预分配物理容量。
             "cpu_prefix_kv_bytes": cpu_kv_bytes,
             "cpu_prefix_kv_bytes_peak": cpu_kv_bytes,
+            "cpu_prefix_cache_live_bytes": cpu_kv_bytes,
+            "cpu_prefix_cache_live_bytes_peak": cpu_kv_bytes,
+            "cpu_prefix_pool_reserved_bytes": self.cpu_prefix_pool_reserved_bytes,
+            "cpu_prefix_pool_reuse_count": 0,
+            "cpu_prefix_pool_on_demand_alloc_count": 0,
+            "cpu_prefix_pool_exhausted_count": 0,
+            "cpu_prefix_pool_writeback_rejected_count": 0,
             "cpu_prefix_cache_eviction_count": 0,
             "cpu_prefix_cache_evicted_bytes": 0,
             "cpu_prefix_writeback_latency_sum": 0.0,
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
             "cpu_prefix_restore_latency_max": 0.0,
+            "cpu_prefix_writeback_submit_wall_sec": 0.0,
+            "cpu_prefix_writeback_event_wall_sec": 0.0,
+            "cpu_prefix_writeback_cpu_alloc_wall_sec": 0.0,
+            "cpu_prefix_writeback_copy_enqueue_wall_sec": 0.0,
+            "cpu_prefix_writeback_pending_append_wall_sec": 0.0,
             "prefill_prepare_wall_sec": 0.0,
             "prefill_sample_prepare_wall_sec": 0.0,
             "prefill_model_cuda_sec": 0.0,
@@ -184,6 +253,15 @@ class ModelRunner:
         metrics["cpu_prefix_kv_bytes_peak"] = max(metrics["cpu_prefix_kv_bytes_peak"], current_cpu_kv_bytes)
         metrics["cpu_prefix_kv_gb"] = current_cpu_kv_bytes / (1024 ** 3)
         metrics["cpu_prefix_kv_gb_peak"] = metrics["cpu_prefix_kv_bytes_peak"] / (1024 ** 3)
+        metrics["cpu_prefix_cache_live_bytes"] = current_cpu_kv_bytes
+        metrics["cpu_prefix_cache_live_bytes_peak"] = max(metrics["cpu_prefix_cache_live_bytes_peak"], current_cpu_kv_bytes)
+        metrics["cpu_prefix_cache_live_gb"] = current_cpu_kv_bytes / (1024 ** 3)
+        metrics["cpu_prefix_cache_live_gb_peak"] = metrics["cpu_prefix_cache_live_bytes_peak"] / (1024 ** 3)
+        metrics["cpu_prefix_pool_reserved_bytes"] = self.cpu_prefix_pool_reserved_bytes
+        metrics["cpu_prefix_pool_reserved_gb"] = self.cpu_prefix_pool_reserved_bytes / (1024 ** 3)
+        metrics["cpu_prefix_pool_reserved_block_count"] = self.cpu_prefix_pool_reserved_block_count
+        metrics["cpu_prefix_pool_free_block_count"] = len(self.cpu_prefix_pool_free_blocks)
+        metrics["cpu_prefix_pool_used_block_count"] = self.cpu_prefix_pool_reserved_block_count - len(self.cpu_prefix_pool_free_blocks)
         metrics["cpu_prefix_cache_block_count"] = len(self.cpu_prefix_cache)
         writeback_count = metrics["cpu_prefix_writeback_count"]
         restore_count = metrics["cpu_prefix_restore_count"]
@@ -201,8 +279,10 @@ class ModelRunner:
         while self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] > self.cpu_prefix_cache_limit_bytes and self.cpu_prefix_cache:
             h, entry = self.cpu_prefix_cache.popitem(last=False)
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= entry["bytes"]
+            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
             self.prefix_transfer_metrics["cpu_prefix_cache_eviction_count"] += 1
             self.prefix_transfer_metrics["cpu_prefix_cache_evicted_bytes"] += entry["bytes"]
+            self._release_cpu_prefix_block(entry)
             evicted_hashes.append(h)
         return evicted_hashes
 
@@ -211,15 +291,17 @@ class ModelRunner:
         # 这样 Scheduler 看到 CPU hit 时，一定能安全地从 cpu_prefix_cache 取到完整 KV。
         # 对 V3 来说，这一步也是“pending victim”变成“CPU-backed victim”的分界点。
         bytes_written = 0
-        for h, cpu_block in pending["blocks"]:
+        for h, cpu_block, pooled in pending["blocks"]:
             nbytes = cpu_block.numel() * cpu_block.element_size()
             old = self.cpu_prefix_cache.get(h)
             if old is not None:
                 # 相同 prefix 被再次写回时覆盖旧 CPU backing，避免 CPU occupancy 重复计数。
                 self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= old["bytes"]
-            self.cpu_prefix_cache[h] = {"block": cpu_block, "bytes": nbytes}
+                self._release_cpu_prefix_block(old)
+            self.cpu_prefix_cache[h] = {"block": cpu_block, "bytes": nbytes, "pooled": pooled}
             self.cpu_prefix_cache.move_to_end(h)
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] += nbytes
+            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
             bytes_written += nbytes
 
         latency = pending["start_event"].elapsed_time(pending["done_event"]) / 1000
@@ -229,6 +311,9 @@ class ModelRunner:
         self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"] = max(self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"], latency)
         self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"] = max(
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
+        )
+        self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"] = max(
+            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"]
         )
         return self._enforce_cpu_prefix_cache_limit()
 
@@ -258,30 +343,53 @@ class ModelRunner:
         if not entries:
             return []
 
+        submit_start = perf_counter()
+        event_start = perf_counter()
         compute_done = torch.cuda.Event()
         torch.cuda.current_stream().record_event(compute_done)
+        self.prefix_transfer_metrics["cpu_prefix_writeback_event_wall_sec"] += perf_counter() - event_start
+
         writeback_ids = []
+        evicted_hashes = []
         with torch.cuda.stream(self.copy_stream):
             self.copy_stream.wait_event(compute_done)
             for h, block_id in entries:
                 writeback_id = self.next_prefix_writeback_id
                 self.next_prefix_writeback_id += 1
+
+                event_start = perf_counter()
                 start_event = torch.cuda.Event(enable_timing=True)
                 done_event = torch.cuda.Event(enable_timing=True)
+                self.prefix_transfer_metrics["cpu_prefix_writeback_event_wall_sec"] += perf_counter() - event_start
+
                 gpu_block = self.kv_cache[:, :, block_id]
                 # pinned CPU tensor 才能让 non_blocking D2H 真正异步排到 copy stream 上。
-                cpu_block = torch.empty(gpu_block.shape, dtype=gpu_block.dtype, device="cpu", pin_memory=True)
+                alloc_start = perf_counter()
+                cpu_block, pooled, evicted_hash = self._take_cpu_prefix_block(gpu_block.shape, gpu_block.dtype)
+                self.prefix_transfer_metrics["cpu_prefix_writeback_cpu_alloc_wall_sec"] += perf_counter() - alloc_start
+                if evicted_hash is not None:
+                    evicted_hashes.append(evicted_hash)
+                if cpu_block is None:
+                    break
+
+                copy_start = perf_counter()
                 start_event.record()
                 cpu_block.copy_(gpu_block, non_blocking=True)
                 done_event.record()
+                self.prefix_transfer_metrics["cpu_prefix_writeback_copy_enqueue_wall_sec"] += perf_counter() - copy_start
+
+                append_start = perf_counter()
                 self.pending_prefix_writebacks.append({
                     "id": writeback_id,
-                    "blocks": [(h, cpu_block)],
+                    "blocks": [(h, cpu_block, pooled)],
                     "start_event": start_event,
                     "done_event": done_event,
                 })
                 writeback_ids.append(writeback_id)
-        return writeback_ids
+                self.prefix_transfer_metrics["cpu_prefix_writeback_pending_append_wall_sec"] += perf_counter() - append_start
+
+        self.prefix_transfer_metrics["cpu_prefix_writeback_submit_wall_sec"] += perf_counter() - submit_start
+        return {"writeback_ids": writeback_ids, "evicted_hashes": evicted_hashes}
 
     def _copy_cpu_blocks_to_gpu(self, block_copies):
         # block_copies 是 (CPU KV block, 新 GPU block id)，目前用于 CPU prefix restore。

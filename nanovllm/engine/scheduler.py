@@ -1,5 +1,6 @@
 from collections import deque
 import math
+from time import perf_counter
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
@@ -65,6 +66,14 @@ class Scheduler:
             "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
             "lazy_writeback_completed_block_count": 0,
             "cpu_prefix_cache_evicted_metadata_count": 0,
+            "lazy_writeback_after_alloc_check_count": 0,
+            "lazy_writeback_after_alloc_trigger_count": 0,
+            "lazy_writeback_after_alloc_skip_count": 0,
+            "lazy_writeback_maintain_call_count": 0,
+            "lazy_writeback_maintain_wall_sec": 0.0,
+            "lazy_writeback_pending_hash_wall_sec": 0.0,
+            "lazy_writeback_select_wall_sec": 0.0,
+            "lazy_writeback_submit_wall_sec": 0.0,
         }
         self.block_manager.reset_metrics()
 
@@ -86,6 +95,14 @@ class Scheduler:
             "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
             "lazy_writeback_completed_block_count": self.metrics["lazy_writeback_completed_block_count"],
             "cpu_prefix_cache_evicted_metadata_count": self.metrics["cpu_prefix_cache_evicted_metadata_count"],
+            "lazy_writeback_after_alloc_check_count": self.metrics["lazy_writeback_after_alloc_check_count"],
+            "lazy_writeback_after_alloc_trigger_count": self.metrics["lazy_writeback_after_alloc_trigger_count"],
+            "lazy_writeback_after_alloc_skip_count": self.metrics["lazy_writeback_after_alloc_skip_count"],
+            "lazy_writeback_maintain_call_count": self.metrics["lazy_writeback_maintain_call_count"],
+            "lazy_writeback_maintain_wall_sec": self.metrics["lazy_writeback_maintain_wall_sec"],
+            "lazy_writeback_pending_hash_wall_sec": self.metrics["lazy_writeback_pending_hash_wall_sec"],
+            "lazy_writeback_select_wall_sec": self.metrics["lazy_writeback_select_wall_sec"],
+            "lazy_writeback_submit_wall_sec": self.metrics["lazy_writeback_submit_wall_sec"],
         }
         metrics.update(self.block_manager.get_metrics())
         metrics["victim_window_safe_or_pending_block_count"] = (
@@ -129,15 +146,26 @@ class Scheduler:
         if not entries:
             return 0
         assert self.writeback_prefix_blocks is not None
-        # pending block 仍可被当前 request 使用或后续 GPU hit，但不能被 LRU victim 覆盖。
-        self.block_manager.mark_cpu_writeback_pending(entries)
-        writeback_ids = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
-        for writeback_id, entry in zip(writeback_ids, entries):
+        writeback_result = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
+        if isinstance(writeback_result, dict):
+            writeback_ids = writeback_result["writeback_ids"]
+            evicted_hashes = writeback_result.get("evicted_hashes", [])
+        else:
+            writeback_ids = writeback_result
+            evicted_hashes = []
+        accepted_entries = entries[:len(writeback_ids)]
+        # Only accepted D2H copies are protected. A hard-capped CPU pool may
+        # reject the tail when every reserved block is already pending.
+        self.block_manager.mark_cpu_writeback_pending(accepted_entries)
+        for writeback_id, entry in zip(writeback_ids, accepted_entries):
             self.pending_prefix_writebacks[writeback_id] = {
                 "entries": [entry],
                 "release_on_complete": release_on_complete,
                 "lazy": lazy,
             }
+        if evicted_hashes:
+            self.block_manager.unregister_cpu_blocks(evicted_hashes)
+            self.metrics["cpu_prefix_cache_evicted_metadata_count"] += len(evicted_hashes)
         self.metrics["pending_prefix_writeback_count"] = len(self.pending_prefix_writebacks)
         return len(writeback_ids)
 
@@ -163,19 +191,43 @@ class Scheduler:
 
     def _maintain_lazy_writeback_window(self):
         # V3 专用入口：按 cache 压力维护 inactive LRU 的 CPU-backed victim 窗口。
-        # 和 eager 入口不同，这里不接收 seq，也不按 request 全量写回。
+        # profile 指标只拆 Python 热路径，不改变异步 D2H 的执行语义。
         if not self.enable_lazy_cpu_kv_writeback:
             return
-        # V3 的触发点只放在 schedule()：每轮调度/分配结束后，
-        # 看 inactive LRU 的“安全 victim 窗口”是否不足。
-        # postprocess() 只负责把完成的 request 释放进 inactive，不在关键路径上逐请求写回。
+        maintain_start = perf_counter()
+        self.metrics["lazy_writeback_maintain_call_count"] += 1
+
+        # V3 的触发点只放在真正发生 allocation 之后：
+        # free blocks 跌破 safety window，才扫描 inactive LRU 前沿补 CPU-backed victim。
+        pending_start = perf_counter()
+        pending_hashes = self._pending_writeback_hashes()
+        self.metrics["lazy_writeback_pending_hash_wall_sec"] += perf_counter() - pending_start
+
+        select_start = perf_counter()
         entries = self.block_manager.select_lazy_writeback_entries(
             self.lazy_writeback_target_blocks,
-            self._pending_writeback_hashes(),
+            pending_hashes,
         )
+        self.metrics["lazy_writeback_select_wall_sec"] += perf_counter() - select_start
+
         # lazy writeback 的 block 已经 inactive，所以 release_on_complete=False；
         # D2H 完成后只是把它标成 CPU-backed victim，不需要再释放 request 引用。
+        submit_start = perf_counter()
         self._submit_prefix_writeback_entries(entries, release_on_complete=False, lazy=True)
+        self.metrics["lazy_writeback_submit_wall_sec"] += perf_counter() - submit_start
+        self.metrics["lazy_writeback_maintain_wall_sec"] += perf_counter() - maintain_start
+
+    def _maintain_lazy_writeback_window_after_allocation(self):
+        if not self.enable_lazy_cpu_kv_writeback:
+            return
+        self.metrics["lazy_writeback_after_alloc_check_count"] += 1
+        # 真正 free 的 block 是零成本容量；inactive block 仍保存旧 KV，覆盖它才算驱逐。
+        # 只有 free 水位不足时才启动 lazy writeback，避免每个 decode step 都扫 LRU。
+        if self.block_manager.free_block_count() >= self.lazy_writeback_target_blocks:
+            self.metrics["lazy_writeback_after_alloc_skip_count"] += 1
+            return
+        self.metrics["lazy_writeback_after_alloc_trigger_count"] += 1
+        self._maintain_lazy_writeback_window()
 
     # 回收一下写完的 prefix blocks，用于后续使用。wait=True 时阻塞等待
     def _poll_prefix_writebacks(self, wait: bool = False):
@@ -265,6 +317,7 @@ class Scheduler:
                 break
             if not seq.block_table:
                 restore_entries = self.block_manager.allocate(seq, plan)    # GPU hit 直接引用，CPU hit 先分配 GPU block，miss/全新请求分配空 block
+                self._maintain_lazy_writeback_window_after_allocation()
                 if restore_entries:
                     assert self.restore_prefix_blocks is not None
                     self.restore_prefix_blocks(restore_entries) # 同步 H2D 后再继续 prefill 剩余 suffix。
@@ -282,9 +335,6 @@ class Scheduler:
             scheduled_seqs.append(seq)
 
         if scheduled_seqs:
-            # 一轮 prefill allocation 已经完成，此时再检查是否需要补足 inactive CPU-backed victim 窗口。
-            # 这样 lazy writeback 与调度 step 对齐，而不是和单个 request 的 finish 事件绑定。
-            self._maintain_lazy_writeback_window()
             return scheduled_seqs, True         # 优先做prefill，且只做prefill
 
         # decode
@@ -303,13 +353,12 @@ class Scheduler:
             else:
                 seq.num_scheduled_tokens = 1
                 seq.is_prefill = False
-                self.block_manager.may_append(seq)
+                allocated = self.block_manager.may_append(seq)
+                if allocated:
+                    self._maintain_lazy_writeback_window_after_allocation()
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))   # 重新插入队头，保证纯粹的FCFS
-        # decode 可能刚跨 block 边界并消耗了 free/inactive 容量，
-        # 所以 decode step 后也做一次窗口检查。
-        self._maintain_lazy_writeback_window()
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):

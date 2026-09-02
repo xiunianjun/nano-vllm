@@ -11,16 +11,20 @@ GPU="${GPU:-1}"
 EXP_DIR="${EXP_DIR:-exp/prefix_cache_serving_$(date +%Y%m%d_%H%M%S)}"
 RUNS="${RUNS:-3}"
 
-DOC_LEN="${DOC_LEN:-4096}"
+DOC_LEN="${DOC_LEN:-8192}"
 QUERY_LEN="${QUERY_LEN:-96}"
 OUT_LEN="${OUT_LEN:-16}"
-TARGET_WS_GB="${TARGET_WS_GB:-1.0}"
-GPU_KV_GB="${GPU_KV_GB:-1.1}"
+TARGET_WS_GB="${TARGET_WS_GB:-20.0}"
+GPU_KV_GB="${GPU_KV_GB:-8.0}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
 PREFILL_BATCH_MULT="${PREFILL_BATCH_MULT:-4}"
 REQUEST_RATE="${REQUEST_RATE:-2.0}"
-RUN_BRANCHING="${RUN_BRANCHING:-0}"
-MODES="${MODES:-baseline v1 v2}"
+WARMUP_MODE="${WARMUP_MODE:-stream}"
+STREAM_WARMUP_RATIO="${STREAM_WARMUP_RATIO:-0.3}"
+RUN_BRANCHING="${RUN_BRANCHING:-1}"
+MODES="${MODES:-baseline v1 v2 v3}"
+LAZY_WRITEBACK_WATERMARK_RATIO="${LAZY_WRITEBACK_WATERMARK_RATIO:-0.5}"
+CPU_PREFIX_CACHE_GB_LIMIT="${CPU_PREFIX_CACHE_GB_LIMIT:-0}"
 ROOT_LEN="${ROOT_LEN:-$((DOC_LEN / 2))}"
 BRANCH_LEN="${BRANCH_LEN:-$((DOC_LEN - ROOT_LEN))}"
 PROMPT_LEN="$((DOC_LEN + QUERY_LEN))"
@@ -36,6 +40,9 @@ COMMON_BASE=(
   --output-len "$OUT_LEN"
   --target-working-set-gb "$TARGET_WS_GB"
   --gpu-kv-cache-gb "$GPU_KV_GB"
+  --warmup-mode "$WARMUP_MODE"
+  --stream-warmup-ratio "$STREAM_WARMUP_RATIO"
+  --temperature 0
   --enforce-eager
   --no-use-tqdm
 )
@@ -52,11 +59,28 @@ run_once() {
   local output="$case_dir/${mode}_run${run_id}.json"
   local offload_args=(--no-enable-cpu-kv-offload --enable-gpu-lru-retention)
   if [[ "$mode" == "v1" ]]; then
-    offload_args=(--enable-cpu-kv-offload --no-enable-gpu-lru-retention)
+    offload_args=(
+      --enable-cpu-kv-offload
+      --no-enable-gpu-lru-retention
+      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+    )
   elif [[ "$mode" == "v2" ]]; then
-    offload_args=(--enable-cpu-kv-offload --enable-gpu-lru-retention)
+    offload_args=(
+      --enable-cpu-kv-offload
+      --enable-gpu-lru-retention
+      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+    )
+  elif [[ "$mode" == "v3" ]]; then
+    offload_args=(
+      --enable-cpu-kv-offload
+      --enable-gpu-lru-retention
+      --enable-lazy-cpu-kv-writeback
+      --lazy-writeback-watermark-ratio "$LAZY_WRITEBACK_WATERMARK_RATIO"
+      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+    )
   fi
-  local arrival_args=(--arrival-mode "$arrival_mode" --arrival-seed "$run_id")
+  # The two seeds are paired across modes, while each independent run gets a new trace.
+  local arrival_args=(--arrival-mode "$arrival_mode" --arrival-seed "$run_id" --shuffle-seed "$run_id")
   if [[ "$arrival_mode" == "poisson" ]]; then
     arrival_args+=(--request-rate "$request_rate")
   fi
@@ -73,6 +97,8 @@ summarize_case() {
   local case_dir="$1"
   "$PYTHON" - "$case_dir" > "$case_dir/summary.json" <<'PY_SUMMARY'
 import json
+import math
+import re
 import statistics
 import sys
 from pathlib import Path
@@ -80,21 +106,28 @@ from pathlib import Path
 case_dir = Path(sys.argv[1])
 keys = [
     "query_elapsed_sec",
-    "request_rate_actual",
+    "offered_rate_realized",
+    "achieved_throughput",
     "planned_arrival_span_sec",
     "request_latency_count",
     "request_latency_avg",
     "request_latency_median",
+    "request_latency_p90",
+    "request_latency_p99",
     "request_latency_min",
     "request_latency_max",
     "ttft_latency_count",
     "ttft_latency_avg",
     "ttft_latency_median",
+    "ttft_latency_p90",
+    "ttft_latency_p99",
     "ttft_latency_min",
     "ttft_latency_max",
     "queueing_latency_count",
     "queueing_latency_avg",
     "queueing_latency_median",
+    "queueing_latency_p90",
+    "queueing_latency_p99",
     "queueing_latency_min",
     "queueing_latency_max",
     "prefill_step_time_sec",
@@ -116,8 +149,18 @@ keys = [
     "gpu_lru_hit_block_count",
     "gpu_lru_hit_token_count",
     "gpu_lru_eviction_count",
+    "gpu_lru_evicted_cpu_backed_block_count",
+    "gpu_lru_evicted_gpu_only_block_count",
     "gpu_lru_cached_block_count",
     "gpu_lru_cached_block_peak",
+    "inactive_cpu_backed_block_count",
+    "inactive_gpu_only_block_count",
+    "inactive_pending_writeback_block_count",
+    "inactive_safe_or_pending_block_count",
+    "safe_allocatable_block_count",
+    "lazy_writeback_target_block_count",
+    "lazy_writeback_scheduled_block_count",
+    "lazy_writeback_completed_block_count",
     "document_recomputed_tokens_est",
     "cpu_prefix_d2h_bytes",
     "cpu_prefix_h2d_bytes",
@@ -126,6 +169,19 @@ keys = [
     "cpu_prefix_kv_gb",
     "cpu_prefix_kv_gb_peak",
     "cpu_prefix_cache_block_count",
+    "cpu_prefix_cache_eviction_count",
+    "cpu_prefix_cache_evicted_bytes",
+    "cpu_prefix_cache_evicted_metadata_count",
+    "cpu_prefix_pool_gb",
+    "cpu_prefix_pool_gb_requested",
+    "cpu_prefix_pool_reserved_gb",
+    "cpu_prefix_pool_reserved_block_count",
+    "cpu_prefix_pool_free_block_count",
+    "cpu_prefix_pool_used_block_count",
+    "cpu_prefix_pool_reuse_count",
+    "cpu_prefix_pool_on_demand_alloc_count",
+    "cpu_prefix_pool_exhausted_count",
+    "cpu_prefix_pool_writeback_rejected_count",
     "cpu_prefix_restore_latency_sum",
     "cpu_prefix_writeback_latency_sum",
     "schedule_time_sec",
@@ -144,57 +200,128 @@ keys = [
     "single_prompt_to_gpu_kv_ratio",
     "single_prompt_fit_count_est",
 ]
-summary = {"case": case_dir.name, "modes": {}}
-for mode in ("baseline", "v1", "v2"):
-    rows = []
+# Two-sided 95% Student-t critical values; normal approximation beyond 30 df.
+T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+       7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228, 11: 2.201, 12: 2.179,
+       13: 2.160, 14: 2.145, 15: 2.131, 16: 2.120, 17: 2.110, 18: 2.101,
+       19: 2.093, 20: 2.086, 21: 2.080, 22: 2.074, 23: 2.069, 24: 2.064,
+       25: 2.060, 26: 2.056, 27: 2.052, 28: 2.048, 29: 2.045, 30: 2.042}
+
+
+def stats(values):
+    mean = statistics.fmean(values)
+    stdev = statistics.stdev(values) if len(values) > 1 else 0.0
+    critical = T95.get(len(values) - 1, 1.96) if len(values) > 1 else 0.0
+    half_width = critical * stdev / math.sqrt(len(values)) if len(values) > 1 else 0.0
+    return {
+        "mean": mean,
+        "stdev": stdev,
+        "ci95_low": mean - half_width,
+        "ci95_high": mean + half_width,
+        "min": min(values),
+        "max": max(values),
+    }
+
+
+mode_rows = {}
+for mode in ("baseline", "v1", "v2", "v3"):
+    rows = {}
     for path in sorted(case_dir.glob(f"{mode}_run*.json")):
-        rows.append(json.loads(path.read_text()))
-    if not rows:
-        continue
-    mode_summary = {"runs": len(rows)}
+        match = re.search(r"_run(\d+)\.json$", path.name)
+        if match:
+            rows[int(match.group(1))] = json.loads(path.read_text())
+    if rows:
+        mode_rows[mode] = rows
+
+summary = {"case": case_dir.name, "modes": {}}
+for mode, rows_by_run in mode_rows.items():
+    rows = list(rows_by_run.values())
+    mode_summary = {"runs": len(rows), "run_ids": sorted(rows_by_run)}
     for key in keys:
         values = [row.get(key, 0) for row in rows]
-        mode_summary[key] = {
-            "mean": statistics.fmean(values),
-            "min": min(values),
-            "max": max(values),
-        }
+        mode_summary[key] = stats(values)
     for key in (
         "arrival_mode", "request_rate_target", "num_documents", "reusable_prefix_length",
-        "working_set_gb_actual", "gpu_kv_cache_gb_actual", "query_requests"
+        "working_set_gb_actual", "gpu_kv_cache_gb_actual", "query_requests",
+        "measured_workload_profile", "temperature",
     ):
         mode_summary[key] = rows[0].get(key)
     summary["modes"][mode] = mode_summary
 
+
 def mean(mode, key):
     return summary["modes"][mode][key]["mean"]
 
+
 def add_speedups(dst, lhs, rhs, label):
-    if lhs not in summary["modes"] or rhs not in summary["modes"]:
+    if lhs not in mode_rows or rhs not in mode_rows:
         return
+    common_runs = sorted(set(mode_rows[lhs]) & set(mode_rows[rhs]))
     for out_key, metric in (
-        ("query_elapsed_speedup", "query_elapsed_sec"),
         ("request_latency_median_speedup", "request_latency_median"),
+        ("request_latency_p99_speedup", "request_latency_p99"),
         ("ttft_median_speedup", "ttft_latency_median"),
+        ("ttft_p99_speedup", "ttft_latency_p99"),
         ("queueing_avg_speedup", "queueing_latency_avg"),
-        ("queueing_max_speedup", "queueing_latency_max"),
+        ("queueing_p99_speedup", "queueing_latency_p99"),
         ("prefill_time_speedup", "prefill_step_time_sec"),
         ("decode_time_speedup", "decode_step_time_sec"),
     ):
-        denom = mean(lhs, metric)
-        dst[f"{out_key}_{label}"] = mean(rhs, metric) / denom if denom else 0
+        denominator = mean(lhs, metric)
+        dst[f"{out_key}_{label}"] = mean(rhs, metric) / denominator if denominator else 0.0
+        paired = []
+        for run_id in common_runs:
+            lhs_value = mode_rows[lhs][run_id].get(metric, 0)
+            rhs_value = mode_rows[rhs][run_id].get(metric, 0)
+            if lhs_value:
+                paired.append(rhs_value / lhs_value)
+        dst[f"{out_key}_{label}_paired"] = stats(paired) if paired else None
+
 
 summary["comparison"] = {}
 add_speedups(summary["comparison"], "v1", "baseline", "v1_over_baseline")
 add_speedups(summary["comparison"], "v2", "baseline", "v2_over_baseline")
 add_speedups(summary["comparison"], "v2", "v1", "v2_over_v1")
-if "baseline" in summary["modes"]:
-    summary["comparison"]["baseline_recomputed_tokens_mean"] = mean("baseline", "document_recomputed_tokens_est")
-if "v1" in summary["modes"]:
-    summary["comparison"]["v1_restored_tokens_mean"] = mean("v1", "cpu_prefix_cache_restored_token_count")
-if "v2" in summary["modes"]:
-    summary["comparison"]["v2_restored_tokens_mean"] = mean("v2", "cpu_prefix_cache_restored_token_count")
-    summary["comparison"]["v2_gpu_lru_hit_tokens_mean"] = mean("v2", "gpu_lru_hit_token_count")
+add_speedups(summary["comparison"], "v3", "v2", "v3_over_v2")
+add_speedups(summary["comparison"], "v3", "v1", "v3_over_v1")
+
+trace_mismatches = []
+output_mismatches = []
+all_runs = sorted(set().union(*(set(rows) for rows in mode_rows.values()))) if mode_rows else []
+for run_id in all_runs:
+    per_run = {mode: rows[run_id] for mode, rows in mode_rows.items() if run_id in rows}
+    trace_hashes = {mode: row.get("trace_sha256") for mode, row in per_run.items()}
+    output_hashes = {mode: row.get("output_sha256") for mode, row in per_run.items()}
+    if len(set(trace_hashes.values())) > 1:
+        trace_mismatches.append({"run_id": run_id, "hashes": trace_hashes})
+    if len(set(output_hashes.values())) > 1:
+        output_mismatches.append({"run_id": run_id, "hashes": output_hashes})
+
+budget_violations = []
+for mode, rows in mode_rows.items():
+    for run_id, row in rows.items():
+        limit = row.get("cpu_prefix_cache_gb_limit", 0) or 0
+        if not row.get("enable_cpu_kv_offload") or limit <= 0:
+            continue
+        reserved = row.get("cpu_prefix_pool_reserved_gb", 0)
+        on_demand = row.get("cpu_prefix_pool_on_demand_alloc_count", 0)
+        if reserved > limit + 1e-9 or on_demand != 0:
+            budget_violations.append({
+                "mode": mode,
+                "run_id": run_id,
+                "limit_gb": limit,
+                "reserved_gb": reserved,
+                "on_demand_alloc_count": on_demand,
+            })
+
+summary["validation"] = {
+    "paired_trace_ok": not trace_mismatches,
+    "trace_mismatches": trace_mismatches,
+    "greedy_output_match_ok": not output_mismatches,
+    "output_mismatches": output_mismatches,
+    "cpu_physical_budget_ok": not budget_violations,
+    "cpu_physical_budget_violations": budget_violations,
+}
 print(json.dumps(summary, indent=2, sort_keys=True))
 PY_SUMMARY
   echo "[$(date '+%F %T')] wrote $case_dir/summary.json"
@@ -209,8 +336,13 @@ run_case() {
   shift 5
   local case_dir="$EXP_DIR/$name"
   mkdir -p "$case_dir"
+  read -r -a mode_list <<< "$MODES"
+  local mode_count="${#mode_list[@]}"
   for run_id in $(seq 1 "$RUNS"); do
-    for mode in $MODES; do
+    # Rotate the first mode each run to counterbalance thermal/order effects.
+    local start_index=$(( (run_id - 1) % mode_count ))
+    for offset in $(seq 0 $((mode_count - 1))); do
+      local mode="${mode_list[$(( (start_index + offset) % mode_count ))]}"
       run_once "$case_dir" "$mode" "$run_id" "$max_num_seqs" "$max_num_batched_tokens" "$arrival_mode" "$request_rate" "$@"
     done
   done
@@ -233,8 +365,7 @@ run_case hot_cold_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$RE
   --repeat-mode hot_cold \
   --repeat-count 4 \
   --hot-documents 2 \
-  --hot-request-ratio 0.7 \
-  --shuffle-seed 0
+  --hot-request-ratio 0.7
 
 if [[ "$RUN_BRANCHING" == "1" ]]; then
   run_case branching_prefix_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
@@ -244,8 +375,7 @@ if [[ "$RUN_BRANCHING" == "1" ]]; then
     --repeat-mode hot_cold \
     --repeat-count 4 \
     --hot-documents 2 \
-    --hot-request-ratio 0.7 \
-    --shuffle-seed 1
+    --hot-request-ratio 0.7
 fi
 
 "$PYTHON" - "$EXP_DIR" > "$EXP_DIR/summary.json" <<'PY_ROOT_SUMMARY'
