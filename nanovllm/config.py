@@ -47,6 +47,8 @@ class Config:
     # V3: 不再 prefill 后全量写回 CPU，只维护一段可安全淘汰的 CPU-backed inactive window。
     enable_lazy_cpu_kv_writeback: bool = False
     lazy_writeback_watermark_ratio: float = 0.5
+    # > 0 时直接指定安全 victim window；0 保持按 max_num_batched_tokens 推导的旧行为。
+    lazy_writeback_target_blocks: int = 0
     # <= 0 表示不限制 CPU prefix cache；> 0 时按 LRU 淘汰 CPU backing，后续 miss 只能 recompute。
     cpu_prefix_cache_gb_limit: float = 0.0
     # > 0 时预分配固定容量 pinned CPU KV block pool，避免 writeback 热路径临时 pin_memory 分配。
@@ -58,6 +60,7 @@ class Config:
         assert self.kvcache_block_size % 256 == 0
         assert 1 <= self.tensor_parallel_size <= 8
         assert self.lazy_writeback_watermark_ratio >= 0
+        assert self.lazy_writeback_target_blocks >= 0
         assert self.cpu_prefix_cache_gb_limit >= 0
         assert self.cpu_prefix_pool_gb >= 0
         self.kv_cache_policy = KVCachePolicy.from_flags(

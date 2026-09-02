@@ -50,7 +50,9 @@ class LLMEngine:
         if config.kv_cache_policy.cpu_offload:
             # Scheduler 只负责调度决策；真正搬 prefix KV tensor 的 D2H/H2D 操作必须在 ModelRunner 里做，
             # 因为 kv_cache tensor、copy stream 和 CUDA event 都属于 model runner 进程/设备上下文。
-            self.scheduler.writeback_prefix_blocks = lambda entries: self.model_runner.call("writeback_prefix_blocks", entries)
+            self.scheduler.writeback_prefix_blocks = lambda entries, preferred=None, protected=None: self.model_runner.call(
+                "writeback_prefix_blocks", entries, preferred, protected
+            )
             self.scheduler.restore_prefix_blocks = lambda entries: self.model_runner.call("restore_prefix_blocks", entries)
             self.scheduler.poll_prefix_writebacks = lambda wait=False: self.model_runner.call("poll_prefix_writebacks", wait)
         self.request_start_times = {}
@@ -103,6 +105,15 @@ class LLMEngine:
     def get_metrics(self):
         metrics = self.scheduler.get_metrics()
         metrics.update(self.model_runner.get_prefix_transfer_metrics())
+        duplicate_blocks = metrics.get("cpu_gpu_duplicate_block_count", 0)
+        cpu_blocks = metrics.get("cpu_prefix_cache_block_count", 0)
+        gpu_blocks = metrics.get("gpu_prefix_cached_block_count", 0)
+        union_blocks = cpu_blocks + gpu_blocks - duplicate_blocks
+        metrics.update({
+            "cpu_cache_gpu_duplicate_ratio": duplicate_blocks / cpu_blocks if cpu_blocks else 0.0,
+            "gpu_cache_cpu_backed_ratio": duplicate_blocks / gpu_blocks if gpu_blocks else 0.0,
+            "cpu_gpu_duplicate_union_ratio": duplicate_blocks / union_blocks if union_blocks else 0.0,
+        })
         latencies = self.request_latencies
         ttft_latencies = self.step_metrics["ttft_latencies"]
         queueing_latencies = self.queueing_latencies

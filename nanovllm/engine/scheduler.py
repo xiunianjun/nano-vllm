@@ -34,7 +34,7 @@ class Scheduler:
         # 一轮 scheduler step 最多新增 target_alloc_blocks 个 KV blocks，再乘 watermark 留冗余。
         # 这里维护的是 inactive LRU 中“已 CPU-backed 或正在写回”的 victim 数量，
         # 而不是一看到 request prefill 完就把它的所有 prefix 都搬到 CPU。
-        self.lazy_writeback_target_blocks = math.ceil(
+        self.lazy_writeback_target_blocks = config.lazy_writeback_target_blocks or math.ceil(
             target_alloc_blocks * (1 + config.lazy_writeback_watermark_ratio)
         )
         # V1 prefix offload 通过 LLMEngine 注入 ModelRunner 侧的 copy 回调。
@@ -115,7 +115,9 @@ class Scheduler:
             "lazy_writeback_select_wall_sec": self.metrics["lazy_writeback_select_wall_sec"],
             "lazy_writeback_submit_wall_sec": self.metrics["lazy_writeback_submit_wall_sec"],
         }
-        metrics.update(self.block_manager.get_metrics())
+        metrics.update(self.block_manager.get_metrics(
+            self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0
+        ))
         metrics["victim_window_safe_or_pending_block_count"] = (
             self.block_manager.victim_window_safe_or_pending_count(self.lazy_writeback_target_blocks)
             if self.enable_lazy_cpu_kv_writeback else 0
@@ -149,7 +151,21 @@ class Scheduler:
         if not entries:
             return 0
         assert self.writeback_prefix_blocks is not None
-        writeback_result = self.writeback_prefix_blocks([(h, block_id) for h, block_id, _tokens in entries])
+        preferred_cpu_evictions = None
+        protected_cpu_evictions = None
+        if self.enable_lazy_cpu_kv_writeback:
+            gpu_resident, protected = self.block_manager.gpu_residency_for_cpu_eviction(
+                self.lazy_writeback_target_blocks
+            )
+            # Keep CPU backing for the GPU LRU victim front.  Copies for active/MRU
+            # and other window-external GPU blocks are redundant and leave first.
+            preferred_cpu_evictions = gpu_resident - protected
+            protected_cpu_evictions = protected
+        writeback_result = self.writeback_prefix_blocks(
+            [(h, block_id) for h, block_id, _tokens in entries],
+            preferred_cpu_evictions,
+            protected_cpu_evictions,
+        )
         if isinstance(writeback_result, dict):
             writeback_ids = writeback_result["writeback_ids"]
             evicted_hashes = writeback_result.get("evicted_hashes", [])
@@ -320,10 +336,13 @@ class Scheduler:
                 break
             if not seq.block_table:
                 restore_entries = self.block_manager.allocate(seq, plan)    # GPU hit 直接引用，CPU hit 先分配 GPU block，miss/全新请求分配空 block
-                self._maintain_lazy_writeback_window_after_allocation()
                 if restore_entries:
                     assert self.restore_prefix_blocks is not None
                     self.restore_prefix_blocks(restore_entries) # 同步 H2D 后再继续 prefill 剩余 suffix。
+                # restore plan 是按 allocation 前的 CPU cache 快照生成的。必须先消费它，
+                # 再允许 bounded CPU pool 的 lazy writeback 淘汰 LRU backing；否则同轮
+                # writeback 可能复用 restore_entries 仍要读取的 CPU block。
+                self._maintain_lazy_writeback_window_after_allocation()
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             self.metrics["prefill_token_count"] += seq.num_scheduled_tokens
             if seq.recompute_pending_tokens:

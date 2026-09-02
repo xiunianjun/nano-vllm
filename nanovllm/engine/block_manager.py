@@ -65,8 +65,41 @@ class BlockManager:
             "lazy_writeback_scheduled_block_count": 0,
         }
 
-    def get_metrics(self):
+    def gpu_residency_for_cpu_eviction(self, protected_window_blocks: int):
+        """Return GPU-resident hashes and the LRU victim-front hashes to protect.
+
+        CPU backing outside the protected victim window is redundant capacity: the
+        corresponding KV is still available on GPU and is not next in line for GPU
+        eviction.  The ModelRunner uses these snapshots only as CPU eviction hints;
+        BlockManager remains the source of truth for residency and safety.
+        """
+        gpu_resident_hashes = set(self.hash_to_block_id)
+        protected_hashes = set()
+        for i, block_id in enumerate(self.inactive_block_ids):
+            if i >= protected_window_blocks:
+                break
+            block = self.blocks[block_id]
+            if block.hash != -1:
+                protected_hashes.add(block.hash)
+        return gpu_resident_hashes, protected_hashes
+
+    def get_metrics(self, protected_window_blocks: int = 0):
         metrics = dict(self.metrics)
+        gpu_prefix_hashes = set(self.hash_to_block_id)
+        cpu_prefix_hashes = set(self.cpu_hash_to_token_ids)
+        duplicate_hashes = gpu_prefix_hashes & cpu_prefix_hashes
+        _gpu_resident, protected_hashes = self.gpu_residency_for_cpu_eviction(protected_window_blocks)
+        active_hashes = {
+            block.hash for block in self.blocks
+            if block.ref_count > 0 and block.hash != -1
+        }
+        metrics["gpu_prefix_cached_block_count"] = len(gpu_prefix_hashes)
+        metrics["cpu_gpu_duplicate_block_count"] = len(duplicate_hashes)
+        metrics["cpu_gpu_active_duplicate_block_count"] = len(duplicate_hashes & active_hashes)
+        metrics["cpu_gpu_protected_duplicate_block_count"] = len(duplicate_hashes & protected_hashes)
+        metrics["cpu_gpu_unprotected_duplicate_block_count"] = len(
+            duplicate_hashes - active_hashes - protected_hashes
+        )
         inactive_cpu_backed = sum(
             1 for block_id in self.inactive_block_ids
             if not self.blocks[block_id].writeback_pending and self._is_cpu_backed(block_id)

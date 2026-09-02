@@ -177,10 +177,27 @@ class ModelRunner:
         self.cpu_prefix_pool_reserved_block_count = len(self.cpu_prefix_pool_free_blocks)
         self.cpu_prefix_pool_reserved_bytes = self.cpu_prefix_pool_reserved_block_count * self.cpu_prefix_block_nbytes
 
-    def _evict_one_cpu_prefix_cache_entry(self):
+    def _evict_one_cpu_prefix_cache_entry(self, preferred_hashes=None, protected_hashes=None):
         if not self.cpu_prefix_cache:
             return None
-        h, entry = self.cpu_prefix_cache.popitem(last=False)
+        h = None
+        preferred = False
+        if preferred_hashes:
+            # Preserve CPU LRU ordering inside the preferred class.  This is a
+            # bounded scan (hundreds of blocks in the current setup), performed
+            # only when the pinned pool is full and a writeback needs a block.
+            h = next((candidate for candidate in self.cpu_prefix_cache if candidate in preferred_hashes), None)
+            preferred = h is not None
+        if h is None and protected_hashes:
+            # CPU-only blocks still carry unique cache capacity, but sacrificing an
+            # old one is safer than removing backing from the imminent GPU victims.
+            h = next((candidate for candidate in self.cpu_prefix_cache if candidate not in protected_hashes), None)
+        if h is None:
+            h, entry = self.cpu_prefix_cache.popitem(last=False)
+        else:
+            entry = self.cpu_prefix_cache.pop(h)
+        if preferred:
+            self.prefix_transfer_metrics["cpu_prefix_cache_preferred_duplicate_eviction_count"] += 1
         self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= entry["bytes"]
         self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
         self.prefix_transfer_metrics["cpu_prefix_cache_eviction_count"] += 1
@@ -188,7 +205,7 @@ class ModelRunner:
         self._release_cpu_prefix_block(entry)
         return h
 
-    def _take_cpu_prefix_block(self, shape, dtype):
+    def _take_cpu_prefix_block(self, shape, dtype, preferred_hashes=None, protected_hashes=None):
         if self.cpu_prefix_pool_free_blocks:
             self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
             return self.cpu_prefix_pool_free_blocks.pop(), True, None
@@ -197,7 +214,7 @@ class ModelRunner:
             # A configured pool is a physical-memory hard cap. Reuse one LRU live
             # block; if all pool blocks are pending, reject the writeback rather
             # than silently allocating outside the advertised budget.
-            evicted_hash = self._evict_one_cpu_prefix_cache_entry()
+            evicted_hash = self._evict_one_cpu_prefix_cache_entry(preferred_hashes, protected_hashes)
             if self.cpu_prefix_pool_free_blocks:
                 self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
                 return self.cpu_prefix_pool_free_blocks.pop(), True, evicted_hash
@@ -231,6 +248,7 @@ class ModelRunner:
             "cpu_prefix_pool_writeback_rejected_count": 0,
             "cpu_prefix_cache_eviction_count": 0,
             "cpu_prefix_cache_evicted_bytes": 0,
+            "cpu_prefix_cache_preferred_duplicate_eviction_count": 0,
             "cpu_prefix_writeback_latency_sum": 0.0,
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
@@ -272,19 +290,14 @@ class ModelRunner:
         metrics["cpu_prefix_restore_latency_avg"] = metrics["cpu_prefix_restore_latency_sum"] / restore_count if restore_count else 0.0
         return metrics
 
-    def _enforce_cpu_prefix_cache_limit(self):
+    def _enforce_cpu_prefix_cache_limit(self, preferred_hashes=None, protected_hashes=None):
         if self.cpu_prefix_cache_limit_bytes <= 0:
             return []
         evicted_hashes = []
         # cpu_prefix_cache 也是 OrderedDict：restore/writeback 命中会 move_to_end，
         # 因此 last=False 淘汰的是 CPU 侧最久未使用的 backing。
         while self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] > self.cpu_prefix_cache_limit_bytes and self.cpu_prefix_cache:
-            h, entry = self.cpu_prefix_cache.popitem(last=False)
-            self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= entry["bytes"]
-            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
-            self.prefix_transfer_metrics["cpu_prefix_cache_eviction_count"] += 1
-            self.prefix_transfer_metrics["cpu_prefix_cache_evicted_bytes"] += entry["bytes"]
-            self._release_cpu_prefix_block(entry)
+            h = self._evict_one_cpu_prefix_cache_entry(preferred_hashes, protected_hashes)
             evicted_hashes.append(h)
         return evicted_hashes
 
@@ -320,7 +333,9 @@ class ModelRunner:
         self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"] = max(
             self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"]
         )
-        return self._enforce_cpu_prefix_cache_limit()
+        return self._enforce_cpu_prefix_cache_limit(
+            pending.get("preferred_cpu_evictions"), pending.get("protected_cpu_evictions")
+        )
 
     def poll_prefix_writebacks(self, wait: bool = False):
         # CUDA 没有 Python 层自动回调；这里用 done_event.query() 判断 async D2H 是否完成。
@@ -341,7 +356,7 @@ class ModelRunner:
         self.pending_prefix_writebacks = still_pending
         return {"completed_ids": completed_ids, "evicted_hashes": evicted_hashes}
 
-    def writeback_prefix_blocks(self, entries):
+    def writeback_prefix_blocks(self, entries, preferred_cpu_evictions=None, protected_cpu_evictions=None):
         # D2H 写回统一走这里：V1/V2 传入的是 prefill 完整 prefix，V3 传入的是
         # inactive LRU victim 侧挑出的少量 blocks。真实 copy 是异步的，返回的 id 交给 Scheduler 跟踪。
         # 同一次提交共享一对 timing/completion events。copy stream 保证 batch 内 copy 有序，
@@ -357,7 +372,9 @@ class ModelRunner:
             gpu_block = self.kv_cache[:, :, block_id]
             # pinned CPU tensor 才能让 non_blocking D2H 真正异步排到 copy stream 上。
             alloc_start = perf_counter()
-            cpu_block, pooled, evicted_hash = self._take_cpu_prefix_block(gpu_block.shape, gpu_block.dtype)
+            cpu_block, pooled, evicted_hash = self._take_cpu_prefix_block(
+                gpu_block.shape, gpu_block.dtype, preferred_cpu_evictions, protected_cpu_evictions
+            )
             self.prefix_transfer_metrics["cpu_prefix_writeback_cpu_alloc_wall_sec"] += perf_counter() - alloc_start
             if evicted_hash is not None:
                 evicted_hashes.append(evicted_hash)
@@ -392,6 +409,8 @@ class ModelRunner:
                 "blocks": [(h, cpu_block, pooled) for h, _block_id, cpu_block, pooled in accepted],
                 "start_event": start_event,
                 "done_event": done_event,
+                "preferred_cpu_evictions": preferred_cpu_evictions,
+                "protected_cpu_evictions": protected_cpu_evictions,
             })
             self.prefix_transfer_metrics["cpu_prefix_writeback_pending_append_wall_sec"] += perf_counter() - append_start
 

@@ -152,6 +152,9 @@ venv.bak/
 /exp/doclen_sweep_v1_vs_recompute_20260829_113423/
 /exp/cpu_kv_memory_doclen_sweep_20260901_095156/
 /exp/prefix_cache_serving_20260901_094857/
+/exp/prefix_cache_serving_20260901_154339/
+/exp/prefix_cache_serving_20260901_181056/
+/exp/v3_memory_sweep_20260901_160936/
 /exp/doclen_sweep_v1_vs_recompute_20260830_092132/
 /exp/doclen_sweep_v1_vs_recompute_queue_20260830_100635/
 /exp/doclen_sweep_serving_poisson_*/
@@ -160,6 +163,8 @@ venv.bak/
 /exp/**/baseline_run*.json
 /exp/**/v1_run*.json
 /exp/**/v2_run*.json
+/exp/**/v2_reference_run*.json
+/exp/**/v3_run*.json
 /exp/**/*.log
 /exp/**/*.pt
 /exp/**/*.pth
@@ -227,4 +232,5 @@ cython_debug/
 /.venv-fa/
 /.venv-fa28/
 /wheels/
-
+/exp/**/v3_wm_*_run*.json
+/exp/v3_memory_sweep_20260901_204227/

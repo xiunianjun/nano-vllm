@@ -1,10 +1,16 @@
 # nano-vLLM GPU+CPU Prefix Cache 进展
 
-## 研究方向
+> 更新时间：2026-09-02
+>
+> 当前有效实验：`exp/prefix_cache_hotset12_20260902_110808/`
+>
+> 当前主结论只覆盖 `hot_cold_sharing`；旧实验结果已全部清除。
 
-目标：把 nano-vLLM 现有 GPU prefix cache 扩展为 GPU + CPU 两级 prefix cache。
+## 1. 项目目标
 
-请求查找 prefix KV 时：
+本项目把 nano-vLLM 的 GPU prefix cache 扩展为 GPU+CPU 两级 KV cache，目标场景是：热点 prefix 的总 KV working set 已超过 GPU KV cache，GPU 无法保留全部热点，但 CPU 仍有容量保存可复用 KV。
+
+请求查找 prefix KV 时有三条路径：
 
 ```text
 GPU hit              -> 直接复用 GPU KV
@@ -12,425 +18,316 @@ GPU miss + CPU hit   -> H2D restore 到 GPU，跳过 prefix prefill
 GPU miss + CPU miss  -> 正常 prefill / recompute
 ```
 
-约束：模型权重始终完整驻留 GPU，只人为限制 GPU KV cache capacity；第一阶段不考虑 SSD、不引入 ShareGPT、不把 preemption-driven swapping 作为主实验。
+模型权重始终完整驻留 GPU；实验只限制 GPU KV cache 容量。本阶段不考虑 SSD，也不把 preemption swapping 当作主要机制。
 
-实现上需要贴合 nano-vLLM 当前 block 抽象：`BlockManager` 管理的是 logical block，一个 logical block id 对应所有 layer 的 K/V slice。
+实现沿用 nano-vLLM 的 logical block 抽象：一个 block id 对应所有 layer 的 K/V slice。当前 Qwen3-8B、block size 256 tokens 时，一个完整 KV block 约为 36 MiB。
 
-```text
-kv_cache shape = [K/V][layer][block_id][token_offset][kv_head][head_dim]
-Qwen3-8B: 1 logical block = 256 tokens = 36 MiB 全层 KV
-```
+## 2. 版本语义
 
-## 环境
+| 模式 | CPU offload | GPU inactive LRU | CPU writeback | 目的 |
+|---|---:|---:|---|---|
+| GPU-only baseline | 否 | 是 | 无 | GPU miss 后重新计算 prefix |
+| V1 | 是 | 否 | eager，全量 | 验证 CPU backing/restore 的基础收益 |
+| V2 | 是 | 是 | eager，全量 | 用 GPU LRU 减少 V1 的同步 H2D restore |
+| V3 | 是 | 是 | lazy，按水位选择 | 在 V2 基础上探索 CPU memory/latency tradeoff |
 
-```text
-GPU: NVIDIA H200 NVL
-Model: /data/datasets/models-hf/Qwen3-8B
-venv: .venv-fa28
-Python: 3.10.19
-Torch: 2.8.0+cu128
-FlashAttention: 2.8.3.post1
-```
+重要口径：当前脚本中的 `baseline` 实际参数是 `--no-enable-cpu-kv-offload --enable-gpu-lru-retention`，所以它是 **GPU-only LRU baseline**，不是“关闭所有 cache 的纯 recompute baseline”。原始 JSON 的 `mode=gpu_prefix_cache_recompute_baseline` 只是遗留名称，分析时不得据此误判。
 
-说明：`.venv-fa28` 中已有匹配的 `flash-attn` wheel，后续 benchmark 优先使用该环境，避免本地编译。
+### V1：CPU eager backing
 
-## 代码入口
+- prompt prefill 完成后，完整 prefix blocks 异步 D2H 写回 CPU。
+- CPU backing 以 block hash 为 key；token ids 继续用于 hash collision 校验。
+- GPU miss、CPU hit 时分配 GPU block并同步 H2D，剩余未命中 token 才 prefill。
+- pending D2H 的 GPU block受到保护，复制完成前不能被覆盖。
+- V1 不保留 inactive GPU prefix，因此重复访问主要走 CPU restore。
 
-```text
-bench_long_doc_qa.py
-scripts/run_prefix_cache_cases.sh
-```
+### V2：CPU eager backing + GPU LRU retention
 
-`bench_long_doc_qa.py` 负责生成 synthetic long-doc / branching workload，并输出 JSON metrics。`scripts/run_prefix_cache_cases.sh` 负责批量跑 baseline / V1 / V2 / V3，并为每个 case 生成 `summary.json`。
+- V1 的 CPU eager writeback 保持不变。
+- 请求结束后，完整 prefix block 进入 inactive GPU LRU，不立即丢弃。
+- 新请求命中 inactive block 时重新激活，避免一次 CPU H2D。
+- 需要空间时先使用真正 free block，再驱逐 inactive LRU block；优先驱逐已有 CPU backing 的 block。
+- 同一请求按逆序释放，使更通用、靠近 prefix 根部的 block在相同 recency 下保留更久。
 
-## V1 实现
+V2 相对 V1 的核心评价指标是 GPU LRU hits、同步 swapin blocks、H2D bytes、restore time 和 prefill time，而不是只看最终吞吐。
 
-V1 已实现 CPU prefix cache backing store，重点是 correctness 和可观测性。
+### V3：memory-aware lazy writeback
 
-核心路径：
-
-- prompt prefill 完成后，完整 prefix blocks 立刻 async D2H 写回 CPU。
-- decode 新生成 tokens 暂不主动纳入 prefix cache；后续请求重新 prefill 成完整 block 后再进入 cache。
-- 写回前用 block hash + token ids 去重：CPU 已有或正在 pending writeback 时跳过。
-- waiting request 调度时查最长连续 prefix：GPU hit 直接复用，CPU hit 分配 GPU block 并同步 H2D restore，miss 后剩余 token 正常 prefill。
-- pending writeback 的 GPU block 会被保护，D2H 完成后再释放；V1 选择优先保证正确性。
-
-已验证 smoke test：
-
-| 场景 | 结果 |
-|---|---|
-| 重复 prompt 写回 | 第二次请求不会重复 D2H，同一 prefix block 写回去重生效 |
-| `D0 -> D1 -> D0` 小 GPU cache | 第三次 `D0` GPU miss + CPU hit，可 H2D restore 并跳过 prefix prefill |
-
-## V2 实现：GPU LRU Retention
-
-V2 已实现。它不做调度感知预取，目标是把 V1 中“request 结束后 GPU KV 是否还能复用”的随缘行为，改成明确的 inactive GPU prefix cache policy。
-
-核心语义：
-
-```text
-active block   = 正在被 running / waiting request 引用，不能淘汰
-inactive block = request 已结束或释放引用，KV 仍在 GPU，hash 仍有效，可作为 GPU prefix cache 命中
-free block     = 没有有效 cache 内容，或已经被 LRU eviction 选中可覆盖
-```
-
-V2 路径：
-
-- request prefill 完成后仍按 V1 主动 async D2H 写回 CPU backing。
-- request finish 后，完整 prefix blocks 不立刻进入普通 free list，而是进入 inactive GPU LRU。
-- 释放同一个 request 的 blocks 时按逆序入队：tail prefix 先进入 LRU/free queue，在相同 recency 下更早被淘汰；靠近 prefix 根部的 block 更通用，因此尽量留久一点。这个策略对齐 vLLM 的 prefix-aware LRU 细节。
-- 新 request prefix lookup 时，如果命中 inactive block，则从 LRU 中移出并重新变成 active GPU hit。
-- 需要新 GPU block 时，优先使用真正空闲 block；不够时从 inactive LRU 端驱逐 victim；仍不够时才进入现有 preemption 路径。
-- eviction 优先选择已经 CPU-backed 的 inactive block；没有 CPU backing 的 inactive block 只有在空间仍不足时才被淘汰。
-- pending writeback 已改成 block 粒度：已完成 D2H 的 block 可以先进入 CPU-backed LRU/可淘汰集合，未完成 D2H 的 block 继续 protected。
-
-V2 重点指标：
-
-```text
-gpu_prefix_miss_request_count
-cpu_sync_swapin_request_count
-cpu_sync_swapin_block_count
-cpu_sync_swapin_token_count
-cpu_prefix_restore_latency_sum
-gpu_lru_hit_block_count
-gpu_lru_hit_token_count
-gpu_lru_eviction_count
-gpu_lru_cached_block_count
-gpu_lru_cached_block_peak
-```
-
-预期收益：相比 V1，V2 不是 overlap H2D，而是减少同步 swapin 次数、H2D bytes 和 H2D latency，同时提升 GPU prefix reuse。
-
-## V3 设计：内存感知 Lazy Writeback
-
-V3 在 V2 LRU 上只做一个优化：memory-aware selective writeback。
-
-核心变化：不再 prefill 后全量写回 CPU，而是只给最可能被回收的 inactive GPU blocks 做 lazy D2H。动机是 CPU cache 也有限，V1/V2 的全量 backing 会让大量“GPU 上已经保留、短期不需要 CPU 副本”的 KV 占住 CPU 空间，反而挤掉更有价值的 prefix，甚至迫使它们被丢弃或下沉到更慢层级。V3 希望把 CPU 空间优先留给即将失去 GPU 副本、且未来仍可能复用的 KV，同时减少不必要的 PCIe D2H 流量。
-
-Lazy writeback 的触发时机参考 vLLM simple CPU offload 的 safety-window 思路，但当前 nano-vLLM 实现更保守：只在一次 allocation 之后发现 free blocks 低于目标水位时，才扫描 inactive LRU 前沿并补一批异步 D2H。这样避免每个 decode step 都做 lazy window 维护。
-
-```text
-scheduler step
-  -> allocation 真的发生
-  -> free blocks < target_free
-  -> 扫描 inactive LRU victim window
-  -> 挑选 GPU-only victim blocks 异步写回 CPU
-```
-
-核心阈值也参考 vLLM，不写死固定 block 数，而是按单轮 scheduler step 可能新增的最大 KV blocks 估算 safety window：
+V3 不再把所有完成的 prefix 立刻写入 CPU，只在 allocation 后 GPU 可安全回收空间低于目标水位时，从 inactive LRU 的 eviction end 选择 GPU-only blocks 做异步 D2H：
 
 ```text
 target_blocks = ceil(max_num_batched_tokens / block_size)
 target_free   = target_blocks * (1 + lazy_writeback_watermark_ratio)
 ```
 
-vLLM 当前 lazy CPU offload 使用 `lazy_writeback_watermark_ratio = 1.0`，即大约保留 `2 * ceil(max_num_batched_tokens / block_size)` 个 already-backed inactive/free blocks。我们的场景里 `max_num_batched_tokens` 可能为了长 prompt 设得偏宽，直接用 `1.0` 会比较激进，容易提前复制过多 KV 到 CPU。因此 V3 不再只看单个默认值，而是把 watermark 当成实验变量。
+也可以用 `lazy_writeback_target_blocks` 直接指定绝对 block 数；大于 0 时覆盖上述按最大 batch 推导的值，便于按实际 workload 校准安全窗口。
 
-当 already-backed window 不足时，从 inactive LRU 的 eviction end 选择 GPU-only blocks，批量异步 D2H。这样 GPU 需要腾空间时，可以优先淘汰 already-backed blocks，避免在关键路径上同步 D2H；同时又不会像 V1/V2 那样把所有 prefix 都常驻 CPU。
+当前状态包括 active GPU、inactive GPU-only、inactive GPU+CPU-backed、pending writeback、CPU-only 和 dropped。V3 使用预分配 pinned CPU block pool，避免在 scheduler 热路径逐 block 分配 pinned tensor；配置 CPU cap 后，pool 同时是物理内存硬上限，容量不足时按 CPU LRU 复用或拒绝 writeback。
 
-实现上新增 pinned CPU block pool：设置 `cpu_prefix_pool_gb > 0` 后，初始化阶段预分配固定数量的 pinned CPU KV blocks，writeback 热路径只从 pool 取 buffer，不再临时 `torch.empty(..., pin_memory=True)`。CPU LRU 淘汰时释放的是有效 backing，并把 pooled buffer 还回 free list。
+需要区分：
 
-### V3 性能 Bug 记录
+- `cpu_prefix_cache_live_gb`：当前真正有效、可命中的 CPU backing。
+- `cpu_prefix_pool_reserved_gb`：预分配的物理 pinned-memory 容量。
+- `cpu_prefix_cache_gb_limit=0`：CPU cache 不设逻辑上限；不是“CPU 容量为 0”。
+- 当前没有独立的“CPU watermark”；CPU 侧配置是 hard cap/pool capacity。
 
-早期 V3 lazy writeback 虽然使用异步 D2H，但在 scheduler 热路径里逐 block 临时分配 pinned CPU tensor，导致 `schedule_time` 从 V2 的约 `0.54s` 放大到数秒级。profile 后确认主要开销来自 `torch.empty(..., pin_memory=True)`，而不是 CUDA copy 本身；改为初始化阶段预分配 `cpu_prefix_pool_gb` 后，V3 的调度开销基本回到 V2 同级。后续实验需要同时报告有效 CPU cache 占用和预分配 pool 容量，避免把 reserved memory 误读成实际 cached KV。
+GPU sweep 期间 CPU cap 保持为 `0`（unlimited），当前选出的 GPU watermark 为绝对值 `40 blocks`。它是当前 workload 下未发生 GPU-only eviction 的最小已测点；若需要为不同 seed 或 batch 波动留保守余量，可使用 `60 blocks`。
 
-### 热路径优化（2026-09-02）
+## 3. 已完成的工程优化
 
-- decode admission 用可驱逐 block 计数替代每 token 扫描 inactive LRU。
-- decode 阶段复用 pinned CPU/CUDA buffers；CUDA Graph 直接填充 graph backing buffers。
-- writeback pending record 改为具名结构和直接索引，allocator pending 状态收敛到 `Block`，移除重复 active/pending sets；哈希命中后的 token 比对继续保留碰撞保护。
-- Qwen3-0.6B 短测中吞吐从 `10.0350` 提升到 `10.1480 req/s`（`+1.13%`），query elapsed 从 `0.7972s` 降至 `0.7883s`（`-1.11%`）；输出/trace 哈希与 cache 行为一致。该短测使用 `--enforce-eager`，未覆盖 CUDA Graph 部分收益。
-- D2H writeback 改为每批共享 CUDA events（event 数从 `1+2N` 降为固定 `3`）；同参数确认轮中 event/submit/lazy-maintain 局部耗时分别下降约 `14%/19%/15%`，但端到端吞吐比上一轮低 `0.44%`，短测尚不能证明整体收益。
-- `Sequence` 缓存连续完整 block 的 chained hash，prefix lookup 与 `hash_blocks` 复用同一结果，避免 miss/retry 路径重复构造 NumPy 数组并计算 xxhash；token_ids 比对仍作为 hash collision 保护。
-- 三个兼容 CLI 开关在配置入口统一映射为 `KVCachePolicy`，Scheduler、BlockManager、LLMEngine 和 benchmark mode 不再各自重复拼接 V1/V2/V3 条件；无效组合按既有语义归一化，旧脚本无需修改。
-- 第 7/8 项用相同 Qwen3-0.6B 短测确认两轮：平均吞吐 `9.9529 req/s`、query elapsed `0.8038s`，相对第 5 项确认轮分别为 `-1.49%/+1.51%`；schedule time 平均反而小幅下降 `0.29%`，波动来自 model runner time 增加 `1.54%`。因此本轮结论是调度侧重构正确但端到端无可证明提速；两轮输出/trace 哈希及 GPU hit、CPU restore、eviction、writeback 数均完全一致。
+- decode admission 使用可驱逐 block 计数，避免逐 token 扫描 inactive LRU。
+- decode 路径复用 pinned CPU/CUDA buffer；CUDA Graph 路径直接填 graph backing buffer。
+- pending writeback 使用具名记录和直接索引，allocator pending 状态收敛到 `Block`，移除重复状态集合。
+- 一批 D2H writeback 共享 CUDA events，event 数从随 block 数增长降为固定数量。
+- `Sequence` 缓存连续完整 block 的 chained hashes，lookup 与 `hash_blocks` 复用，保留 token-id 碰撞保护。
+- V1/V2/V3 的兼容 CLI 开关在配置入口统一映射为 `KVCachePolicy`，减少 Scheduler、BlockManager、LLMEngine 和 benchmark 中重复的布尔组合判断。
+- V3 的 bounded CPU cache 改为 GPU-residency-aware eviction：优先淘汰 GPU 仍有副本且不在近期 victim window 内的 CPU backing，并保护即将从 GPU 驱逐的 block；V1/V2 的纯 CPU LRU 语义保持不变。
+- benchmark 增加分阶段计时、CPU/GPU cache 计数、working-set 比例、trace/output 校验和、配对比较及 Student-t 95% CI。
 
-V3 block 状态：
+这些优化已经过小模型短测和行为一致性检查；当前 8B 主实验是在全部优化之后运行。
 
-```text
-active GPU                -> running/waiting request 正在引用
-inactive GPU only         -> 可 GPU hit，但还没有 CPU backing
-inactive GPU + CPU backed -> 可 GPU hit，也可无痛 evict GPU
-pending writeback         -> D2H 未完成，暂时不能覆盖
-CPU only                  -> GPU miss 后可 demand restore
-dropped                   -> CPU/GPU 都没有，后续只能 recompute
-```
+## 4. 当前主实验设计
 
-需要新增配置：
+### 4.1 为什么改成 12 个热点文档
 
-```text
-lazy_writeback_watermark_ratio = 0.5
-cpu_prefix_cache_gb_limit
-cpu_prefix_pool_gb
-```
+旧 workload 只有 2 个热点文档，每个 prefix KV 约 1.125 GiB，热点 working set 仅约 2.25 GiB，小于实际 7.98 GiB GPU KV cache。GPU-only baseline 能长期装下全部热点，因此测不到 offloading 面向的容量压力，V1/V2 的 CPU 搬运只会显得多余。
 
-后续扫描 `lazy_writeback_watermark_ratio = 0 / 0.25 / 0.5 / 1.0`。`0` 只覆盖一轮最大 allocation demand，`1.0` 对齐 vLLM 的 100% watermark；中间值用于观察 CPU 占用和同步 swapin 的折中。暂不把 `2.0` 作为主扫描点，除非需要专门验证更保守窗口对 sync swapin 的上限收益。
-
-关键指标：
+当前改为 12 个热点文档：
 
 ```text
-inactive_cpu_backed_block_count
-inactive_gpu_only_block_count
-victim_window_safe_or_pending_block_count
-lazy_writeback_scheduled/completed_block_count
-evict_already_backed_block_count
-evict_gpu_only_sync_writeback_block_count
-evict_gpu_only_drop_block_count
-cpu_cache_evicted_block_count
-cpu_prefix_cache_live_gb / cpu_prefix_cache_live_gb_peak
-cpu_prefix_pool_reserved_gb
-cpu_prefix_pool_free_block_count / cpu_prefix_pool_used_block_count
-cpu_prefix_pool_on_demand_alloc_count
+hot working set   = 12 * 1.125 GiB = 13.5 GiB
+GPU KV capacity   = 7.9805 GiB
+hot/GPU ratio     = 1.69x
+total working set = 20.25 GiB = 2.54x GPU KV
 ```
 
-内存指标语义：`live_gb` 是当前真正有效、可命中的 CPU prefix backing；`reserved_gb` 是预分配 pinned pool 的物理容量。论文图表优先看 `live_gb/live_gb_peak`，工程排障同时看 `reserved_gb` 和 `on_demand_alloc_count`。
+GPU 估算只能同时容纳 6 个完整 prompt，明显少于 12 个热点 prefix。这样 GPU-only LRU 会发生真实热点 thrashing，而 CPU offload 有机会避免反复 recompute。
 
-V3 的 benchmark 不只看速度，还要看 memory-latency tradeoff：在相同 cache pressure 下，扫描 `lazy_writeback_watermark_ratio` 和 `cpu_prefix_cache_gb_limit`，找到 CPU memory 明显低于 V2、但 sync swapin / TTFT / request latency 接近 V2 的参数区间。`cpu_prefix_cache_gb_limit = 0` 表示不限制 CPU cache，用作上界对照。
+### 4.2 有效配置
 
-专用脚本：
+| 类别 | 配置 |
+|---|---|
+| GPU | NVIDIA H200 NVL，`CUDA_VISIBLE_DEVICES=1` |
+| 模型 | `/data/datasets/models-hf/Qwen3-8B` |
+| 环境 | `.venv-fa28`，Python 3.10.19，Torch 2.8.0+cu128，FlashAttention 2.8.3.post1 |
+| 执行模式 | `--enforce-eager`，temperature 0 |
+| document/query/output | 8192 / 96 / 16 tokens |
+| block size | 256 tokens |
+| target/actual working set | 20.0 / 20.25 GiB，18 documents |
+| requested/actual GPU KV | 8.0 / 7.98046875 GiB，227 blocks |
+| single prompt KV | 1.14038 GiB；约占 GPU KV 14.29%；估算可容纳 6 个 |
+| 并发限制 | `max_num_seqs=8` |
+| prefill batch | `max_num_batched_tokens=33152 = 4 * (8192+96)` |
+| arrival | Poisson，target 2 req/s |
+| warmup | stream，前 30% 请求不计入测量 |
+| hot/cold | 12 hot docs，hot probability 0.8，repeat count 20 |
+| 请求数 | 共 360；warmup 108；measured 252 |
+| 重复 | 3 个 seed，每个 mode 使用同 seed 配对 |
+| 主实验 V3（历史测量点） | watermark ratio 0.5；CPU cap 0；CPU pool 20.25 GiB |
+
+每个 measured trace 都实际覆盖 18 个文档，realized working set 为 20.25 GiB。warmup 在 seed 1 覆盖 17 个文档，seed 2/3 覆盖 18 个。三轮 mode 顺序轮换：
 
 ```text
-scripts/run_v3_memory_sweep.sh
+run 1: baseline -> V1 -> V2 -> V3
+run 2: V1 -> V2 -> V3 -> baseline
+run 3: V2 -> V3 -> baseline -> V1
 ```
 
-默认脚本现在固定 `watermark = 0.5`，扫描 `CPU limit = 20 / 12 / 11 / 10.5 / 10 / 5 / 3 / 2 / 1 GB`；其它 watermark 只在需要复查 GPU safety window 时手动覆盖。本轮不再做 document length sweep，优先固定 `document_length = 8192`；同时把 `target_working_set_gb` 和 `gpu_kv_cache_gb` 放到 `20.0 / 8.0`，保持 working set/GPU 约 `2.5x`、单 prompt/GPU 约 `14%`。这样 cache pressure 主要来自更多 documents，而不是少量超长 request。`cpu_prefix_pool_gb` 需要覆盖实验可能达到的 live backing 峰值并按 block 粒度留余量；例如本轮 actual working set 是 20.25GB，设置 20GB 会出现少量 on-demand allocation，21GB 才能完全走 pool。
+这能降低固定执行顺序与温度/系统漂移的混淆，但不能完全消除时间漂移。
 
-## V4 设计：调度感知 Prefetch / OPT Eviction
+### 4.3 运行命令
 
-V4 再引入 scheduler-aware 优化，不和 V3 的内存优化混在一个版本里。
+```bash
+GPU=1 \
+RUNS=3 \
+RUN_CASE0=0 \
+RUN_CASCADE=0 \
+RUN_HOT_COLD=1 \
+RUN_BRANCHING=0 \
+HOT_DOCUMENTS=12 \
+HOT_REQUEST_RATIO=0.8 \
+HOT_REPEAT_COUNT=20 \
+EXP_DIR=exp/prefix_cache_hotset12_20260902_110808 \
+scripts/run_prefix_cache_cases.sh
+```
 
-计划方向：
+`scripts/run_prefix_cache_cases.sh` 当前通用默认值里 `HOT_DOCUMENTS=2`、`HOT_REPEAT_COUNT=4`，因此复现本轮时必须保留以上显式覆盖；不能只依赖默认参数。
 
-- scheduler inspect waiting/running 队列，提前恢复即将使用的 CPU-resident prefix，尽量把 H2D restore 从关键路径移走。
-- eviction 从朴素 LRU 升级为近似 OPT：在当前可见调度窗口内，优先驱逐最晚才会再次访问、或不会再访问的 inactive block。
-- `sync_swapin` 指标只统计 GPU miss、CPU hit、且预取没赶上导致仍在关键路径同步 H2D 的情况；预取成功不计入 sync swapin。
-- 新增 prefetch accuracy 指标，例如 prefetch true positive、false positive、false negative，用于观察预取取多了还是取少了。
+## 5. Benchmark 严谨性与统计口径
 
-## Workload Cases
+- warmup 和 measured 是同一请求流的连续两段，只有 measured 阶段进入最终统计。
+- 同一 run id 的 baseline/V1/V2/V3 使用相同 arrival seed 和 shuffle seed，逐 run 做 paired comparison。
+- 三轮执行顺序旋转，避免所有模式永远占据相同运行位置。
+- temperature 为 0；校验各模式输出 hash 一致。
+- 校验配对 trace 的 prompt/arrival fingerprint 一致。
+- 校验 CPU live cache 不超过配置的物理 budget。
+- 模式均独立启动进程，避免 cache 状态跨模式泄漏。
+- summary 同时保存三轮 mean、stdev、min/max 和基于 Student-t 的 95% CI；加速比优先使用同 seed 的 paired ratio 均值。
 
-当前参考 LMCache Long-Document QA 的 workload 语义，但文档内容使用 synthetic token IDs。warmup 阶段访问所有 reusable prefixes，不计入最终指标；measured 阶段访问相同 prefix + 不同 query suffix。
-
-| case | 目的 | 访问特征 |
-|---|---|---|
-| `case0_functional` | 单文档功能性校验 | 同一 document 做两次 QA，第二次应命中 GPU prefix cache |
-| `cascade_tile` | 级联污染 / cache thrashing sanity | warmup `D0,D1,...`，query 再从 `D0` 开始；working set 大于 GPU cache 时容易连续 miss |
-| `hot_cold_sharing` | 冷热 document prefix sharing | hot documents 高频访问，cold documents 低频访问；同时出现 GPU hit 和 GPU miss |
-| `branching_prefix_sharing` | 分叉 request 部分共享 | 多个 branch 共享同一个 root prefix，同时各自有不同 branch suffix |
-
-## V2 Benchmark 参数原则
-
-V2 LRU 要测的是 GPU inactive prefix cache 是否能减少 CPU swapin，而不是单个超长 request 把 GPU KV 撑爆。因此后续主实验按下面原则调参：
-
-大白话：用更多不同 document 扩大总 working set，同时降低单个 request 的 KV 占比。不要主要依赖少量超长 document 制造 cache pressure。
-
-需要同时控制两个比例：
+本轮三项自动校验全部通过：
 
 ```text
-single_prompt_KV / GPU_KV
-working_set_KV / GPU_KV
+paired_trace_ok        = true
+greedy_output_match_ok = true
+cpu_physical_budget_ok = true
 ```
 
-含义：
+指标解释：
 
-- `single_prompt_KV / GPU_KV`：一个 request 的 prompt/query/decode 最多占多少 GPU KV。它决定 continuous batching 是否还有空间、inactive LRU 是否有空间留住历史 prefix。目标先放在 `0.25-0.4`。
-- `working_set_KV / GPU_KV`：所有可复用 document prefix 的总 KV 量相对 GPU KV cache 的大小。它决定是否有长期 cache pressure。目标先放在 `2-4`。
+- request latency、TTFT、queueing 是每轮 252 个 measured requests 的分布统计，再对三轮统计量求均值。
+- prefill/decode time 是 measured window 内相应 engine steps 的累计时间。
+- `document_recomputed_tokens_est` 是按未复用文档 prefix 估算的重算量，用于跨模式解释机制。
+- achieved throughput 在本轮主要由 2 req/s 的 offered load 限制，不是系统饱和吞吐；性能结论应以 latency、TTFT、prefill 和 cache traffic 为主。
 
-调参顺序：
+## 6. 当前有效结果
 
-1. 固定 `document_length >= 4096`，但避免单个 prompt 占据 GPU KV 的大部分。
-2. 根据目标 `single_prompt_KV / GPU_KV` 选择 `gpu_kv_cache_gb`。
-3. 根据目标 `working_set_KV / GPU_KV` 自动计算 `num_documents`，优先增加 document 数量，而不是继续拉长 document。
-4. 使用 Poisson arrival、`max_num_seqs=8`、合适的 `max_num_batched_tokens` 跑 serving 场景，确认确实在 continuous batching 下比较 recompute baseline 与 V2 LRU。
+结果目录：`exp/prefix_cache_hotset12_20260902_110808/hot_cold_sharing/`
 
-粗略公式：
+以下均为 3 次运行的均值：
 
-```text
-single_prompt_KV ~= (document_length + query_length + output_len) * kv_bytes_per_token
-working_set_KV ~= num_documents * reusable_prefix_length * kv_bytes_per_token
-```
+| mode | median req | p99 req | median TTFT | p99 TTFT | prefill total | decode total | achieved req/s |
+|---|---:|---:|---:|---:|---:|---:|---:|
+| GPU-only baseline | 0.857s | 2.215s | 0.253s | 1.359s | 41.062s | 47.719s | 2.067 |
+| V1 | 0.542s | 0.923s | 0.063s | 0.124s | 14.200s | 63.056s | 2.070 |
+| V2 | 0.537s | 0.915s | 0.061s | 0.122s | 12.663s | 65.719s | 2.070 |
+| V3 | 0.522s | 0.946s | 0.060s | 0.117s | 12.410s | 64.070s | 2.068 |
 
-当前参数检查：Qwen3-8B bf16 的 KV 约为 `144 MiB / 1K tokens`。旧版 `gpu_kv_cache_gb=1.1` 实际只有约 `1.09 GB` KV blocks，因此单请求占比偏高：
+机制指标：
 
-| document length | single prompt KV | single_prompt_KV / GPU_KV | 粗略可同时容纳完整 prompt 数 |
-|---:|---:|---:|---:|
-| 4096 | 0.578 GB | 0.53 | 1 |
-| 6144 | 0.859 GB | 0.79 | 1 |
-| 7680 | 1.070 GB | 0.98 | 1 |
-
-这个配置可以触发 recompute/restore，但不适合作为 V2 LRU 主实验：GPU 几乎没有空间同时容纳 active requests 和 inactive prefix，LRU 会退化成频繁 swapin/swapout。
-
-后续 benchmark 需要把 `num_documents` 作为由 working set ratio 自动推导的参数，而不是写死。`bench_long_doc_qa.py` 已在 JSON 中输出 `working_set_to_gpu_kv_ratio`、`single_prompt_to_gpu_kv_ratio` 和 `single_prompt_fit_count_est`，用于检查每轮参数是否落在目标范围。
-
-建议先保留两个主档位：
-
-| profile | 目的 | 建议参数 |
-|---|---|---|
-| `moderate_lru` | 干净验证 V2 LRU 是否减少同步 swapin | `document_length=4096`, `gpu_kv_cache_gb≈2.0`, `target_working_set_gb≈6.0`, `max_num_seqs=8`, `max_num_batched_tokens=4*(doc+query)`, `request_rate=0.5-1.0 req/s` |
-| `serving_concurrency` | 更接近 serving 的 continuous batching + cache pressure | `document_length=4096/6144`, `gpu_kv_cache_gb≈4.0`, `target_working_set_gb≈12.0`, `max_num_seqs=8`, `max_num_batched_tokens=4*(doc+query)`, `request_rate` 做 sweep |
-
-`moderate_lru` 的关键是单请求占比约 0.3，GPU 能同时放下多个 active prompt，并留下 inactive LRU 空间；`serving_concurrency` 则用更大的 GPU KV budget 承接并发，同时通过更多 documents 维持 `working_set_KV / GPU_KV ~= 3`。旧版 `gpu_kv_cache_gb=1.1, target_working_set_gb=1.5` 只保留为 capacity-pressure sanity，不作为 V2 主实验配置。
-
-## 实验结果
-
-### 当前可复用结果：8K Serving 对比
-
-结果目录：
-
-```text
-exp/prefix_cache_serving_20260901_181816/
-```
-
-这轮结果是当前主口径：Poisson arrival、continuous batching、8K document prefix，同时包含 recompute baseline / V1 / V2 / V3。后续图表和结论优先使用这一轮。
-
-基础配置：
-
-```text
-model = /data/datasets/models-hf/Qwen3-8B
-runs = 2
-document_length = 8192
-query_length = 96
-output_len = 16
-target_working_set_gb = 20.0
-gpu_kv_cache_gb = 8.0
-max_num_seqs = 8
-max_num_batched_tokens = 33152
-arrival_mode = poisson
-request_rate = 2 req/s
-lazy_writeback_watermark_ratio = 0.5
-cpu_prefix_cache_gb_limit = 0
-```
-
-参数检查：单 prompt 约占 GPU KV 的 `14.3%`，估算可同时容纳 `6` 个完整 prompt；working set/GPU 约 `2.54x`。V3 lazy target 为 `195 blocks`，小于实际 `227 blocks`，不再出现旧版 target window 大于总 GPU blocks 的问题。
-
-图表：
-
-![Measured prefill total time](exp/prefix_cache_serving_20260901_181816/figures/prefill_total.svg)
-
-![Median TTFT](exp/prefix_cache_serving_20260901_181816/figures/ttft_median.svg)
-
-![Synchronous CPU restore blocks](exp/prefix_cache_serving_20260901_181816/figures/sync_swapin_blocks.svg)
-
-![Peak CPU prefix KV memory](exp/prefix_cache_serving_20260901_181816/figures/cpu_memory_peak.svg)
-
-核心结果为 2 次运行均值。TTFT/request/queueing 是 measured requests 的 per-request 分布统计；`prefill total` 是 measured 阶段所有 prefill step 的总 wall time。
-
-| case | mode | docs / requests | recompute tok | CPU restore tok | sync swapin blocks | GPU LRU hit tok | CPU peak | prefill total | median TTFT | min TTFT | median req latency | queue avg / max |
-|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| case0 | baseline | 1 / 1 | 0 | 0 | 0 | 8,192 | 0.00 GB | 0.066s | 0.103s | 0.103s | 0.584s | 0.000 / 0.000s |
-| case0 | V1 | 1 / 1 | 0 | 8,192 | 32 | 0 | 1.12 GB | 0.073s | 0.100s | 0.100s | 0.476s | 0.000 / 0.000s |
-| case0 | V2 | 1 / 1 | 0 | 0 | 0 | 8,192 | 1.12 GB | 0.050s | 0.079s | 0.079s | 0.467s | 0.000 / 0.000s |
-| case0 | V3 | 1 / 1 | 0 | 0 | 0 | 8,192 | 0.00 GB | 0.049s | 0.076s | 0.076s | 0.457s | 0.000 / 0.000s |
-| cascade | baseline | 18 / 18 | 147,456 | 0 | 0 | 0 | 0.00 GB | 4.507s | 0.420s | 0.277s | 1.180s | 0.066 / 0.236s |
-| cascade | V1 | 18 / 18 | 0 | 147,456 | 576 | 0 | 20.25 GB | 1.106s | 0.111s | 0.085s | 0.521s | 0.013 / 0.051s |
-| cascade | V2 | 18 / 18 | 0 | 147,456 | 576 | 0 | 20.25 GB | 1.136s | 0.104s | 0.085s | 0.548s | 0.013 / 0.063s |
-| cascade | V3 | 18 / 18 | 49,664 | 97,792 | 382 | 0 | 14.59 GB | 7.157s | 2.205s | 0.221s | 2.609s | 1.302 / 3.749s |
-| hot/cold | baseline | 18 / 72 | 148,608 | 0 | 0 | 355,200 | 0.00 GB | 6.307s | 0.081s | 0.061s | 0.613s | 0.021 / 0.257s |
-| hot/cold | V1 | 18 / 72 | 0 | 516,096 | 2,016 | 0 | 20.25 GB | 3.958s | 0.095s | 0.063s | 0.526s | 0.011 / 0.057s |
-| hot/cold | V2 | 18 / 72 | 0 | 147,968 | 578 | 359,936 | 20.25 GB | 2.923s | 0.080s | 0.062s | 0.510s | 0.009 / 0.031s |
-| hot/cold | V3 | 18 / 72 | 49,920 | 115,584 | 452 | 264,576 | 19.12 GB | 8.081s | 0.129s | 0.062s | 0.830s | 0.279 / 2.800s |
-| branching | baseline | 35 / 140 | 90,240 | 0 | 0 | 614,272 | 0.00 GB | 7.550s | 0.081s | 0.061s | 0.537s | 0.013 / 0.160s |
-| branching | V1 | 35 / 140 | 0 | 681,984 | 2,664 | 0 | 20.25 GB | 7.203s | 0.093s | 0.062s | 0.537s | 0.011 / 0.062s |
-| branching | V2 | 35 / 140 | 0 | 90,240 | 352 | 599,936 | 20.25 GB | 5.471s | 0.079s | 0.060s | 0.507s | 0.011 / 0.047s |
-| branching | V3 | 35 / 140 | 46,336 | 43,904 | 172 | 546,688 | 16.88 GB | 9.820s | 0.090s | 0.061s | 0.579s | 0.036 / 0.777s |
-
-对比结论：
-
-- `case0_functional` 通过：同一 document 第二次访问能复用 prefix。V3 没有写 CPU 是合理的，因为单文档一直留在 GPU，不需要 backing。
-- `cascade_tile` 是 LRU 无效边界 case。V1/V2 都需要完整同步 restore；V3 可以少存约 `5.66 GB` CPU KV，但因为部分 prefix 没有 backing，会回到 recompute，TTFT 和排队尾延迟明显变差。
-- `hot_cold_sharing` 是主目标 case。V2 相比 V1 把同步 swapin blocks 从 `2016` 降到 `578`，约 `71%`；prefill total 从 `3.96s` 降到 `2.92s`。V3 只省约 `1.12 GB` CPU，但引入 `49,920` recompute tokens，当前 watermark=0.5 不是好参数点。
-- `branching_prefix_sharing` 也符合预期。V2 相比 V1 把同步 swapin blocks 从 `2664` 降到 `352`，约 `87%`；prefill total 从 `7.20s` 降到 `5.47s`。V3 省 `3.38 GB` CPU，但同样产生 recompute，需要后续 sweep 找折中。
-- 当前 V2 的性能提升数字是可信的：queueing latency 整体较低，说明这轮不是旧版一次性批量提交造成的大排队；收益主要来自减少关键路径 CPU restore 和增加 GPU LRU hit。
-- 当前 V3 的功能逻辑可用，但默认参数不是最终结论。下一轮 V3 应扫描 watermark 和 CPU limit，用 memory-latency tradeoff 选点，而不是只看 `0.5 / unlimited CPU`。
-
-### 旧结果处理
-
-以下结果不再用于当前论文/简历项目主结论：
-
-```text
-exp/prefix_cache_serving_20260901_154339/
-exp/prefix_cache_serving_20260901_181056/
-exp/v3_memory_sweep_20260901_160936/
-exp/cpu_kv_memory_doclen_sweep_20260901_095444/
-exp/cpu_kv_memory_doclen_sweep_20260901_095330/
-exp/cpu_kv_memory_doclen_sweep_20260901_095156/
-exp/doclen_sweep_*/
-exp/prefix_cache_v1_vs_recompute_*/
-exp/prefix_cache_serving_poisson_*/
-exp/v2_lru_*/
-exp/smoke_*/
-```
-
-原因：这些结果分别使用了旧统计口径、旧 V1/V2/V3 语义，或旧参数。尤其 `prefix_cache_serving_20260901_181056` 的 V3 配置中 lazy target window 大于实际 GPU KV blocks，不能用于评估 selective writeback。
-
-当前可复用结果只有：
-
-```text
-exp/prefix_cache_serving_20260901_181816/
-```
-
-### V3 Watermark / CPU Cap 初步扫描
-
-结果目录：
-
-```text
-exp/v3_hotcold_gpu_wm_sweep_20260901_214009/
-```
-
-本轮只跑 `hot_cold_sharing`，固定 `document_length=8192`、`gpu_kv_cache_gb=8.0`、`target_working_set_gb=20.0`、Poisson arrival、`max_num_seqs=8`。目的不是重跑完整主实验，而是给 V3 找 memory-latency tradeoff 的参数范围。
-
-第一步先让 CPU cap 失效，只看 GPU lazy writeback watermark。`watermark=1.0` 没跑，因为当前 `max_num_batched_tokens=33152`、`block_size=256` 时 target window 会超过实际 GPU block 数；因此这轮扫 `0 / 0.25 / 0.5 / 0.7`。
-
-| mode | GPU watermark | CPU peak | sync swapin blocks | doc recompute est | prefill total | schedule time | median TTFT | median req latency |
+| mode | recompute tokens | sync swapin blocks | GPU LRU hit blocks | GPU evictions | H2D | CPU peak | restore time | schedule time |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
-| V2 | - | 20.25 GB | 577 | 0 | 3.126s | 0.536s | 0.088s | 0.552s |
-| V3 | 0 | 20.25 GB | 513 | 0 | 3.715s | 0.575s | 0.088s | 0.544s |
-| V3 | 0.25 | 20.25 GB | 545 | 0 | 3.205s | 0.577s | 0.079s | 0.510s |
-| V3 | 0.5 | 20.25 GB | 577 | 0 | 2.968s | 0.577s | 0.080s | 0.502s |
-| V3 | 0.7 | 20.25 GB | 578 | 0 | 3.467s | 0.590s | 0.089s | 0.548s |
+| GPU-only baseline | 1,234,603 | 0 | 2,441 | 4,824 | 0 | 0 | 0 | 0.133s |
+| V1 | 2,731 | 7,541 | 0 | 0 | 265.13 GiB | 20.25 GiB | 5.709s | 5.997s |
+| V2 | 2,731 | 4,740 | 2,780 | 4,751 | 166.65 GiB | 20.25 GiB | 3.588s | 3.893s |
+| V3 | 2,731 | 4,739 | 2,792 | 4,750 | 166.60 GiB | 20.25 GiB | 3.588s | 4.000s |
 
-结论：在 CPU 不限时，`watermark=0.25/0.5` 都没有触发 recompute，sync swapin 与 V2 接近；`0.5` 是这轮最稳的点。调度开销已经回到 V2 同级，说明 pinned CPU pool 和 allocation 后触发基本解决了早期 V3 的 scheduler 热路径开销问题。
+主要 paired speedup：
 
-第二步固定 `watermark=0.5`，改用 stream warmup 扫描 CPU cache cap。stream warmup 只把请求流前 30% 作为稳态预热，不再强制所有 document 都先访问一次；这比 all-doc warmup 更接近 serving 场景，也避免把无限 CPU backing 的 V2 设成过强上界。
+| 对比 | median req | p99 req | median TTFT | p99 TTFT | prefill total |
+|---|---:|---:|---:|---:|---:|
+| V1 / baseline | 1.580x | 2.429x | 4.009x | 10.878x | 2.892x |
+| V2 / baseline | 1.598x | 2.552x | 4.134x | 11.396x | 3.248x |
+| V3 / baseline | 1.641x | 2.394x | 4.203x | 11.416x | 3.311x |
+| V2 / V1 | 1.011x | 1.071x | 1.031x | 1.024x | 1.123x |
+| V3 / V2 | 1.028x | 1.054x | 1.018x | 1.066x | 1.023x |
 
-结果目录：
+## 7. 结果分析
+
+### 7.1 Offloading 在目标压力下有效
+
+新 workload 修正了旧实验的根本问题。热点 working set 为 GPU KV 的 1.69 倍后，GPU-only baseline 即使有 LRU，仍平均重算约 123.5 万 document tokens；V1/V2/V3 仅约 2,731。对应 V1 已取得 1.58x median request、2.43x p99 request 和 2.89x prefill 加速，说明 CPU offloading 在“GPU 装不下热点 prefix”的目标场景中确实有效。
+
+### 7.2 V2 的主要收益是减少 V1 的 H2D
+
+V2 相比 V1：
+
+- sync swapin blocks：7,541 -> 4,740，减少 37.1%。
+- H2D：265.13 -> 166.65 GiB，减少 37.1%。
+- restore time：5.709 -> 3.588s，减少 37.2%。
+- prefill paired speedup：1.123x。
+
+端到端 median request 只提升约 1.1%，不是 V2 没生效，而是本轮 arrival rate 没有把吞吐打满，且 decode 累计时间在 offload 模式中高于 baseline。V2 的机制收益应由 traffic/restore/prefill 指标直接说明。
+
+### 7.3 本轮不能证明 V3 的内存收益
+
+本轮 V3 的 CPU cap 为 unlimited，pool 又覆盖完整 20.25 GiB working set，因此最终 CPU peak 与 V2 相同。V3 与 V2 的 restore、H2D 和 GPU LRU 行为也几乎一致；本轮只能说明 lazy path 在该配置下达到 V2 级性能，不能声称节省 CPU 内存。
+
+要评价 V3，必须保持当前 12-hot-doc workload 不变，再扫描 CPU hard cap，画 CPU peak/eviction/recompute/TTFT 的 tradeoff。旧 workload 下得到的 V3 cap/watermark 扫描已经删除，不应继续引用。
+
+### 7.4 GPU watermark follow-up sweep
+
+保持 hot/cold workload、CPU cap unlimited 和 seed 1 不变，用绝对 block 数复用相同 trace（SHA256 均为 `ffeec039...`）扫描 GPU 安全窗口：
+
+| GPU watermark | GPU-only evictions | sync swapin blocks | document recompute tokens | prefill time |
+|---:|---:|---:|---:|---:|
+| 130 | 0 | 4,798 | 8,192 | 14.15s |
+| 60 | 0 | 4,797 | 8,192 | 12.92s |
+| 40 | 0 | 4,796 | 8,192 | 12.12s |
+| 30 | 9 | 4,428 | 102,912 | 14.55s |
+| 10 | 2,537 | 281 | 1,167,360 | 42.67s |
+
+临界区间位于 `30--40 blocks`：30 blocks 已因少量 GPU-only eviction 放大为整段文档 recompute，40 blocks 则与 60/130 的 cache traffic 和 recompute 行为一致。因此当前实验固定使用 `40 blocks`，而不是原先根据 `max_num_batched_tokens` 保守推导出的 130 blocks。
+
+这里的 40-block 水位主要用于吸收当前 request-level KV allocation 的瞬时 burst，并不代表 D2H 带宽本身需要这么大的长期 backlog。后续若改为 block-wise 或 layer-wise 的渐进分配/回收，分配突发会更平滑，所需安全窗口预计还能进一步缩小。
+
+该 follow-up 是单 seed 快速定位；40 blocks 若作为跨 workload 或生产默认值，仍需补不同 seed、arrival rate 和 batch 形态验证。当前 workload 下更保守的选择是 60 blocks。
+
+### 7.5 GPU-aware CPU LRU：duplicate 容量浪费与初步修复
+
+固定 40-block GPU watermark、16 GiB CPU hard cap 和 seed 1 后，旧实现末态有 455 个 CPU block、224 个 GPU prefix block，其中 199 个同时存在于 CPU/GPU。CPU cache 的 43.7% 被 duplicate 占据，CPU+GPU 合并后只有 480 个 unique blocks，无法覆盖 576-block working set。
+
+原因不是单一的“读回后没有删除 CPU copy”，而是 V3 的正常状态迁移与局部 LRU 决策共同造成：lazy D2H 会有意保留 GPU victim 的 CPU backing；CPU restore 后 backing 仍保留并刷新 CPU recency；同一 prefix 再次在 GPU 命中后可能成为 GPU MRU，但 CPU 仍有副本。旧 CPU LRU 不知道 GPU residency，容量满时可能先淘汰 CPU-only 的唯一副本，却长期保留 CPU+GPU duplicate。
+
+本轮把 V3 CPU eviction 改成分层策略：
+
+1. 先按 CPU LRU 淘汰“GPU 仍有副本、且不在 GPU LRU 前 40 个近期 victim 中”的 duplicate；
+2. 若没有这类 duplicate，再按 CPU LRU 淘汰非保护项；
+3. GPU victim window 内的 CPU backing 最后才允许淘汰，避免下一次 GPU eviction 立即失去可恢复副本。
+
+同一输入 trace 和同一输出（trace/output SHA256 均一致）的 16 GiB 单-seed 对照如下：
+
+| 指标 | 纯 CPU LRU | GPU-aware CPU LRU | 变化 |
+|---|---:|---:|---:|
+| CPU/GPU duplicate blocks | 199 | 103 | -48.2% |
+| duplicate / CPU blocks | 43.7% | 22.6% | -21.1 pp |
+| CPU+GPU unique blocks | 480 | 576 | +20.0%，覆盖完整 working set |
+| document recompute tokens | 315,648 | 90,880 | -71.2% |
+| prefill tokens | 339,840 | 115,072 | -66.1% |
+| sync swapin blocks | 3,598 | 4,467 | +24.2% |
+| H2D traffic | 126.49 GiB | 157.04 GiB | +24.2% |
+| D2H traffic | 43.17 GiB | 152.30 GiB | +252.8% |
+| prefill total | 19.35s | 14.71s | -24.0% |
+| median request | 537.7ms | 529.9ms | -1.5% |
+| p90 request | 826.1ms | 697.5ms | -15.6% |
+| p90 TTFT | 259.5ms | 105.4ms | -59.4% |
+
+这里性能提高并不是 GPU LRU 本身“更准”，而是 CPU 淘汰从局部 recency 变成了考虑两级 residency 的全局价值判断。新策略增加了 869 个 H2D swapin blocks，同时多得到 9 个 GPU cache hits；二者恰好替代 878 个 prefill blocks。当前测量中单 block H2D 约 0.76ms，而避免的 prefill CUDA 计算约 6.4ms/block，因此用更多廉价传输换掉昂贵 recompute，prefill 和 tail latency 反而改善。
+
+代价是 migration churn 明显上升：CPU eviction 从 1,228 增至 4,332，D2H 增至 152.30 GiB，GPU-only eviction 从 4 增至 221。末态 duplicate 中 active/protected/unprotected 分别为 0/40/63，说明 40-block 硬保护窗口外仍可能存在很快再次成为 GPU victim 的 backing。这个结果证明了容量方向有效，但当前策略还不是最终最优；后续应增加 hysteresis 或扩大软保护区，在 recompute 与迁移流量之间找平衡，然后再继续 CPU cap sweep。
+
+上述结论来自单 seed 快速验证，结果目录为 `exp/v3_cpu_blocks40_coarse_20260902_145434/`（旧策略）与 `exp/v3_cpu_gpuaware_16gb_20260902_1535/`（新策略）。
+
+### 7.6 仍需解释的性能现象
+
+- offload 模式 decode total 为 63--66s，高于 baseline 的 47.7s。可能涉及 restore/transfer 对 model step 的干扰、不同 batch/step 形态或 eager-mode 开销，需要单独 profile。
+- achieved throughput 四种模式都约 2.07 req/s，是 arrival-limited 结果，不能外推最大吞吐能力。
+- 本轮强制 eager，不能据此评价 CUDA Graph 路径优化。
+- 只有 3 个独立 seed。median 和 prefill 趋势较清楚，但 p99 与 V2/V3 之间的小差异 CI 很宽，不宜下显著性结论。
+- warmup/measurement 边界仍有 inflight requests：baseline 三轮为 `[3,2,0]`，V1/V2 为 `[2,0,0]`，V3 为 `[3,0,0]`。输入 trace 配对一致，但不同 engine 速度会改变边界 inflight 状态；这是 serving-style continuous warmup 的剩余噪声源。
+
+## 8. 当前结论与下一步
+
+当前可以支持的结论：
+
+1. 当热点 prefix working set 明确超过 GPU KV capacity 时，CPU prefix offloading 相比 GPU-only LRU 显著减少 recompute，并改善 TTFT、request latency 和 prefill time。
+2. V2 GPU LRU retention 明确减少 V1 的同步 H2D/restore，prefill 收益可测；在 2 req/s 的低压 Poisson workload 下，端到端 median 收益被 decode 与 arrival limit 稀释。
+3. V3 GPU 安全窗口在当前 workload 下可从保守推导值 130 blocks 缩至 40 blocks；30 blocks 已出现 GPU-only eviction，因此不能继续缩小 request-level 安全窗口。
+4. 16 GiB 下 GPU-aware CPU LRU 将 duplicate 从 199 降至 103、unique coverage 从 480 提至完整的 576 blocks，并用更多 H2D 换取更少 recompute；但迁移 churn 与 GPU-only eviction 同时上升，尚需进一步约束。
+5. V3 的最终 CPU memory 下限仍应在改进 eviction 稳定性后，由固定 40-block GPU watermark 的 CPU hard-cap sweep 评价。
+
+建议后续按优先级进行：
+
+1. 为 GPU-aware CPU eviction 增加 hysteresis/软保护区，降低刚淘汰 CPU backing 又发生 GPU eviction 的迁移 churn，并用 16 GiB 同 trace 复核 recompute、GPU-only eviction 和 D2H/H2D。
+2. 稳定 eviction 策略后，从 16 GiB 向下扫描 CPU hard cap，以首次出现 document recompute 激增的位置确定容量边界；之后只在边界附近细扫 memory/latency tradeoff。
+3. 在不同 seed、arrival rate 和 batch 形态下复核 40 blocks；若需要无需复核即可使用的保守点，采用 60 blocks。
+4. 增加 request-rate sweep，直到接近饱和，分别报告 offered load、achieved throughput、queueing 和 tail latency。
+5. profile offload 模式较高的 decode time，拆分 model runner、transfer 和 scheduler 干扰。
+6. 如需“纯 recompute”对照，新增同时关闭 CPU offload 和 GPU LRU 的独立模式，并给现有 baseline 重命名，避免口径混淆。
+7. 最终结果至少增加到 5 个 seeds，并保留 raw per-run 数据、paired ratios 和 Student-t CI。
+
+## 9. 结果保留策略
+
+`exp/` 下旧实验、旧图表、旧 summary 和无效中断 campaign 已于 2026-09-02 全部清除。当前只保留：
 
 ```text
-exp/v3_hotcold_cpu_cap_stream_20260901_225019/
+exp/prefix_cache_hotset12_20260902_110808/
+exp/prefix_cache_hotset12_20260902_110808.log
+exp/v3_gpu_wm_coarse_hotset12_20260902_123022/
+exp/v3_gpu_blocks_fast_20260902_142113/
+exp/v3_gpu_blocks30_fast_20260902_143636/
+exp/v3_gpu_blocks40_fast_20260902_144158/
+exp/v3_cpu_blocks40_coarse_20260902_145434/
+exp/v3_cpu_gpuaware_16gb_20260902_1535/
 ```
 
-参照 recompute baseline 使用当前可复用 hot/cold 结果：`prefill total = 6.307s`、`median TTFT = 0.081s`、`median request latency = 0.613s`。
-
-![V3 stream CPU cap speedup vs recompute baseline](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_speedup_vs_recompute.svg)
-
-![V3 stream CPU cap live memory](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_memory.svg)
-
-![V3 stream CPU cap recompute/swapin](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_recompute_swapin.svg)
-
-| CPU cap | CPU peak | CPU evict blocks | CPU hit blocks | sync swapin blocks | doc recompute est | prefill total | prefill speedup vs recompute | median TTFT | median req latency |
-|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
-| 1 GB | 1.02 GB | 5,885 | 0 | 0 | 120,064 | 6.091s | 1.04x | 0.188s | 0.703s |
-| 3 GB | 3.02 GB | 4,158 | 0 | 0 | 110,848 | 5.226s | 1.21x | 0.102s | 0.630s |
-| 5 GB | 5.03 GB | 2,533 | 0 | 0 | 106,496 | 4.792s | 1.32x | 0.096s | 0.601s |
-| 8 GB | 8.02 GB | 913 | 0 | 0 | 106,496 | 4.580s | 1.38x | 0.085s | 0.572s |
-| 10 GB | 10.02 GB | 540 | 2 | 2 | 105,984 | 4.635s | 1.36x | 0.084s | 0.578s |
-| 12.5 GB | 12.52 GB | 381 | 0 | 0 | 106,496 | 4.623s | 1.36x | 0.090s | 0.584s |
-| 14 GB | 14.03 GB | 324 | 14 | 14 | 102,912 | 4.519s | 1.40x | 0.086s | 0.584s |
-| 15 GB | 15.01 GB | 248 | 62 | 62 | 90,624 | 4.280s | 1.47x | 0.087s | 0.555s |
-| 16 GB | 16.03 GB | 153 | 128 | 128 | 73,728 | 3.790s | 1.66x | 0.082s | 0.535s |
-| 17 GB | 17.02 GB | 125 | 128 | 128 | 73,728 | 3.838s | 1.64x | 0.086s | 0.545s |
-| 18 GB | 18.04 GB | 32 | 128 | 128 | 73,728 | 4.008s | 1.57x | 0.105s | 0.702s |
-| 19 GB | 19.02 GB | 4 | 128 | 128 | 73,728 | 3.763s | 1.68x | 0.084s | 0.533s |
-| 20 GB | 19.12 GB | 0 | 128 | 128 | 73,728 | 3.806s | 1.66x | 0.085s | 0.541s |
-
-结论：stream warmup 下，低 CPU cap 不再像 all-doc warmup 那样立刻崩掉，因为热点请求大量由 GPU LRU 命中覆盖；但 `1GB` 已经丢掉 request latency 收益。`5-12.5GB` 仍有 prefill 加速，不过几乎没有 CPU hit，主要收益来自 GPU LRU 而不是 CPU restore。`16GB` 左右开始达到和 `19/20GB` 接近的 CPU restore / recompute 水平，可作为下一轮细扫的中心点；`18GB` 的端到端 latency 有单次抖动，暂不单独下结论。
-
-当前 water marker 记录：GPU lazy writeback watermark 固定为 `0.5`；CPU watermark 这一轮等价为硬 cap 扫描，点位是 `1 / 3 / 5 / 8 / 10 / 12.5 / 14 / 15 / 16 / 17 / 18 / 19 / 20 GB`。后续如果要找最终推荐参数，可以围绕 `14-17GB` 做多次重复。
-
-## 下一步
-
-1. 后续 benchmark 不再默认使用 all-doc warmup 做主结论；改用 serving-style stream：生成一条长请求流，前一段只负责形成 cache steady state，后一段计入指标。
-2. `bench_long_doc_qa.py` 默认已切到 `--warmup-mode stream --stream-warmup-ratio 0.3`；脚本也会显式写入这两个参数。`all_docs` 只保留给 sanity / 旧结果复现，不再作为主实验口径。
-3. V3 当前建议参数：`lazy_writeback_watermark_ratio = 0.5`；stream 口径下 CPU cap 可围绕 `14-17GB` 继续细扫，`16GB` 是目前比较稳的候选点。
-4. 后续主实验改成 cache pressure sweep：固定 `document_length = 8192`，通过改变 `num_documents` 扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
-5. `cascade_tile` 保留为 sanity / stress；性能主张主要来自 `hot_cold_sharing` 和 `branching_prefix_sharing`。
-6. V4 再做 scheduler-aware prefetch / OPT eviction，并补充 prefetch true/false positive、false negative 等准确性指标。
+其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是主实验分析入口；GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；两个 CPU 目录保留 16 GiB eviction 策略对照。后续实验必须使用新的时间戳目录，不覆盖已有结果。

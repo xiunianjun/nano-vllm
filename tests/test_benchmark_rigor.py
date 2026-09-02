@@ -1,5 +1,5 @@
 import unittest
-from collections import OrderedDict, defaultdict
+from collections import OrderedDict, defaultdict, deque
 from types import SimpleNamespace
 
 import torch
@@ -29,6 +29,12 @@ class BenchmarkHelperTests(unittest.TestCase):
             poisson_arrival_offsets(10, 2.0, 9),
             poisson_arrival_offsets(10, 2.0, 10),
         )
+
+    def test_poisson_trace_has_requested_length_and_monotonic_offsets(self):
+        offsets = poisson_arrival_offsets(100, 2.0, 9)
+        self.assertEqual(len(offsets), 100)
+        self.assertEqual(offsets[0], 0.0)
+        self.assertTrue(all(left < right for left, right in zip(offsets, offsets[1:])))
 
     def test_realized_working_set_counts_only_touched_documents(self):
         args = SimpleNamespace(workload="long_doc_qa", document_length=128)
@@ -81,6 +87,41 @@ class CpuPoolHardCapTests(unittest.TestCase):
         self.assertEqual(runner.prefix_transfer_metrics["cpu_prefix_pool_writeback_rejected_count"], 1)
         self.assertEqual(runner.prefix_transfer_metrics["cpu_prefix_pool_on_demand_alloc_count"], 0)
 
+    def test_full_pool_prefers_unprotected_gpu_duplicate_over_cpu_lru(self):
+        runner = self.runner()
+        first = torch.empty(1)
+        duplicate = torch.empty(1)
+        runner.cpu_prefix_cache[17] = {"block": first, "bytes": 4, "pooled": True}
+        runner.cpu_prefix_cache[23] = {"block": duplicate, "bytes": 4, "pooled": True}
+        runner.prefix_transfer_metrics["cpu_prefix_kv_bytes"] = 8
+
+        taken, pooled, evicted_hash = runner._take_cpu_prefix_block(
+            duplicate.shape, duplicate.dtype, preferred_hashes={23}
+        )
+
+        self.assertIs(taken, duplicate)
+        self.assertTrue(pooled)
+        self.assertEqual(evicted_hash, 23)
+        self.assertIn(17, runner.cpu_prefix_cache)
+        self.assertEqual(runner.prefix_transfer_metrics["cpu_prefix_cache_preferred_duplicate_eviction_count"], 1)
+
+    def test_full_pool_keeps_protected_gpu_victim_backing_until_last(self):
+        runner = self.runner()
+        protected = torch.empty(1)
+        cpu_only = torch.empty(1)
+        runner.cpu_prefix_cache[17] = {"block": protected, "bytes": 4, "pooled": True}
+        runner.cpu_prefix_cache[23] = {"block": cpu_only, "bytes": 4, "pooled": True}
+        runner.prefix_transfer_metrics["cpu_prefix_kv_bytes"] = 8
+
+        taken, _pooled, evicted_hash = runner._take_cpu_prefix_block(
+            cpu_only.shape, cpu_only.dtype, preferred_hashes=set(), protected_hashes={17}
+        )
+
+        self.assertIs(taken, cpu_only)
+        self.assertEqual(evicted_hash, 23)
+        self.assertIn(17, runner.cpu_prefix_cache)
+        self.assertEqual(runner.prefix_transfer_metrics["cpu_prefix_cache_preferred_duplicate_eviction_count"], 0)
+
 
 class _CompletedEvent:
     def __init__(self):
@@ -108,6 +149,19 @@ class ModelRunnerWritebackBatchTests(unittest.TestCase):
 
 
 class BlockManagerStateTests(unittest.TestCase):
+    def test_reports_cpu_gpu_prefix_overlap(self):
+        manager = BlockManager(num_blocks=3, block_size=256)
+        for h in (10, 20):
+            block_id = manager._allocate_block()
+            manager.blocks[block_id].update(h, [h])
+            manager.hash_to_block_id[h] = block_id
+        manager.cpu_hash_to_token_ids = {20: [20], 30: [30]}
+
+        metrics = manager.get_metrics()
+
+        self.assertEqual(metrics["gpu_prefix_cached_block_count"], 2)
+        self.assertEqual(metrics["cpu_gpu_duplicate_block_count"], 1)
+
     def test_sequence_reuses_chained_block_hashes(self):
         old_block_size = Sequence.block_size
         Sequence.block_size = 4
@@ -121,6 +175,19 @@ class BlockManagerStateTests(unittest.TestCase):
             self.assertEqual(second, BlockManager.compute_hash([4, 5, 6, 7], first))
         finally:
             Sequence.block_size = old_block_size
+
+    def test_cpu_eviction_hints_protect_gpu_lru_victim_front(self):
+        manager = BlockManager(num_blocks=3, block_size=256)
+        for h in (10, 20, 30):
+            block_id = manager._allocate_block()
+            manager.blocks[block_id].update(h, [h])
+            manager.hash_to_block_id[h] = block_id
+            manager.release_blocks([block_id])
+
+        resident, protected = manager.gpu_residency_for_cpu_eviction(1)
+
+        self.assertEqual(resident, {10, 20, 30})
+        self.assertEqual(protected, {10})
 
     def test_evictable_count_tracks_pending_and_activation(self):
         manager = BlockManager(num_blocks=3, block_size=256)
@@ -164,6 +231,26 @@ class _BlockManagerStub:
 
 
 class SchedulerWritebackProtocolTests(unittest.TestCase):
+    def test_absolute_lazy_writeback_target_overrides_derived_window(self):
+        base = dict(
+            max_num_seqs=8,
+            max_num_batched_tokens=33152,
+            eos=-1,
+            kvcache_block_size=256,
+            kv_cache_policy=KVCachePolicy.CPU_LAZY_GPU_LRU,
+            lazy_writeback_watermark_ratio=0.0,
+            num_kvcache_blocks=227,
+            enable_prefix_cache=True,
+        )
+        self.assertEqual(
+            Scheduler(SimpleNamespace(**base, lazy_writeback_target_blocks=60)).lazy_writeback_target_blocks,
+            60,
+        )
+        self.assertEqual(
+            Scheduler(SimpleNamespace(**base, lazy_writeback_target_blocks=0)).lazy_writeback_target_blocks,
+            130,
+        )
+
     def test_only_accepted_entries_become_pending(self):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.block_manager = _BlockManagerStub()
@@ -174,7 +261,8 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
             "pending_prefix_writeback_count": 0,
             "cpu_prefix_cache_evicted_metadata_count": 0,
         }
-        scheduler.writeback_prefix_blocks = lambda entries: {
+        scheduler.enable_lazy_cpu_kv_writeback = False
+        scheduler.writeback_prefix_blocks = lambda entries, preferred=None, protected=None: {
             "writeback_ids": [41],
             "evicted_hashes": [99],
         }
@@ -187,6 +275,41 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
 
         self.assertEqual(scheduler.pending_writeback_by_block_id, {1: 41})
         self.assertEqual(scheduler.pending_writeback_by_hash, {10: 41})
+
+    def test_restore_precedes_bounded_pool_writeback_maintenance(self):
+        events = []
+        seq = SimpleNamespace(
+            block_table=[],
+            num_blocks=2,
+            num_tokens=8,
+            num_cached_tokens=0,
+            num_scheduled_tokens=0,
+            recompute_pending_tokens=0,
+            status=None,
+        )
+        block_manager = SimpleNamespace(
+            get_allocate_plan=lambda _seq, _cpu: {"sources": [("cpu", 17, [1, 2, 3, 4])]},
+            allocate=lambda _seq, _plan: [(17, 0)],
+        )
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([seq])
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 1
+        scheduler.max_num_batched_tokens = 8
+        scheduler.block_size = 4
+        scheduler.enable_cpu_kv_offload = True
+        scheduler.pending_prefix_writebacks = {}
+        scheduler.block_manager = block_manager
+        scheduler.restore_prefix_blocks = lambda entries: events.append(("restore", entries))
+        scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append(("maintain", None))
+        scheduler._poll_prefix_writebacks = lambda wait=False: None
+        scheduler.metrics = defaultdict(int)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertTrue(is_prefill)
+        self.assertEqual(scheduled, [seq])
+        self.assertEqual([name for name, _ in events], ["restore", "maintain"])
 
 
 if __name__ == "__main__":

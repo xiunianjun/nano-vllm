@@ -21,7 +21,13 @@ PREFILL_BATCH_MULT="${PREFILL_BATCH_MULT:-4}"
 REQUEST_RATE="${REQUEST_RATE:-2.0}"
 WARMUP_MODE="${WARMUP_MODE:-stream}"
 STREAM_WARMUP_RATIO="${STREAM_WARMUP_RATIO:-0.3}"
+RUN_CASE0="${RUN_CASE0:-1}"
+RUN_CASCADE="${RUN_CASCADE:-1}"
+RUN_HOT_COLD="${RUN_HOT_COLD:-1}"
 RUN_BRANCHING="${RUN_BRANCHING:-1}"
+HOT_DOCUMENTS="${HOT_DOCUMENTS:-2}"
+HOT_REQUEST_RATIO="${HOT_REQUEST_RATIO:-0.7}"
+HOT_REPEAT_COUNT="${HOT_REPEAT_COUNT:-4}"
 MODES="${MODES:-baseline v1 v2 v3}"
 LAZY_WRITEBACK_WATERMARK_RATIO="${LAZY_WRITEBACK_WATERMARK_RATIO:-0.5}"
 CPU_PREFIX_CACHE_GB_LIMIT="${CPU_PREFIX_CACHE_GB_LIMIT:-0}"
@@ -109,6 +115,7 @@ keys = [
     "offered_rate_realized",
     "achieved_throughput",
     "planned_arrival_span_sec",
+    "warmup_inflight_at_measurement_start",
     "request_latency_count",
     "request_latency_avg",
     "request_latency_median",
@@ -349,23 +356,31 @@ run_case() {
   summarize_case "$case_dir"
 }
 
-run_case case0_functional 1 "$CASE0_MAX_NUM_BATCHED_TOKENS" batch "$REQUEST_RATE" \
-  --workload long_doc_qa \
-  --num-documents 1 \
-  --repeat-mode tile \
-  --repeat-count 1
+if [[ "$RUN_CASE0" == "1" ]]; then
+  run_case case0_functional 1 "$CASE0_MAX_NUM_BATCHED_TOKENS" batch "$REQUEST_RATE" \
+    --warmup-mode all_docs \
+    --workload long_doc_qa \
+    --num-documents 1 \
+    --repeat-mode tile \
+    --repeat-count 1
+fi
 
-run_case cascade_tile "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
-  --workload long_doc_qa \
-  --repeat-mode tile \
-  --repeat-count 1
+if [[ "$RUN_CASCADE" == "1" ]]; then
+  run_case cascade_tile "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
+    --warmup-mode all_docs \
+    --workload long_doc_qa \
+    --repeat-mode tile \
+    --repeat-count 1
+fi
 
-run_case hot_cold_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
-  --workload long_doc_qa \
-  --repeat-mode hot_cold \
-  --repeat-count 4 \
-  --hot-documents 2 \
-  --hot-request-ratio 0.7
+if [[ "$RUN_HOT_COLD" == "1" ]]; then
+  run_case hot_cold_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
+    --workload long_doc_qa \
+    --repeat-mode hot_cold \
+    --repeat-count "$HOT_REPEAT_COUNT" \
+    --hot-documents "$HOT_DOCUMENTS" \
+    --hot-request-ratio "$HOT_REQUEST_RATIO"
+fi
 
 if [[ "$RUN_BRANCHING" == "1" ]]; then
   run_case branching_prefix_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \

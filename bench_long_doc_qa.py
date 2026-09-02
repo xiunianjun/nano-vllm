@@ -49,6 +49,12 @@ def parse_args():
     parser.add_argument("--enable-gpu-lru-retention", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enable-lazy-cpu-kv-writeback", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--lazy-writeback-watermark-ratio", type=float, default=0.5)
+    parser.add_argument(
+        "--lazy-writeback-target-blocks",
+        type=int,
+        default=0,
+        help="Absolute lazy-writeback victim window. 0 derives it from the batched-token limit.",
+    )
     parser.add_argument("--cpu-prefix-cache-gb-limit", type=float, default=0.0)
     parser.add_argument("--cpu-prefix-pool-gb", type=float, default=0.0, help="Pinned CPU KV pool size. 0 means auto for CPU offload.")
     parser.add_argument("--enforce-eager", action=argparse.BooleanOptionalAction, default=True)
@@ -473,6 +479,7 @@ def main():
         enable_gpu_lru_retention=args.enable_gpu_lru_retention,
         enable_lazy_cpu_kv_writeback=args.enable_lazy_cpu_kv_writeback,
         lazy_writeback_watermark_ratio=args.lazy_writeback_watermark_ratio,
+        lazy_writeback_target_blocks=args.lazy_writeback_target_blocks,
         cpu_prefix_cache_gb_limit=args.cpu_prefix_cache_gb_limit,
         cpu_prefix_pool_gb=cpu_prefix_pool_gb,
     )
@@ -557,6 +564,7 @@ def main():
         "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
         "enable_lazy_cpu_kv_writeback": args.enable_lazy_cpu_kv_writeback,
         "lazy_writeback_watermark_ratio": args.lazy_writeback_watermark_ratio,
+        "lazy_writeback_target_blocks_requested": args.lazy_writeback_target_blocks,
         "cpu_prefix_cache_gb_limit": args.cpu_prefix_cache_gb_limit,
         "cpu_prefix_pool_gb": cpu_prefix_pool_gb,
         "cpu_prefix_pool_gb_requested": args.cpu_prefix_pool_gb,
@@ -606,6 +614,9 @@ def main():
         "query_latency_sec": summarize_latencies(query_latencies),
         "arrival_metadata": arrival_metadata or {},
         "planned_arrival_span_sec": (arrival_metadata or {}).get("planned_arrival_span_sec", 0.0),
+        "warmup_inflight_at_measurement_start": (arrival_metadata or {}).get(
+            "warmup_inflight_at_measurement_start", 0
+        ),
         "offered_rate_realized": arrival_metadata.get("offered_rate_realized", 0.0),
         "achieved_throughput": arrival_metadata.get(
             "achieved_throughput", len(measured_prompts) / query_elapsed if query_elapsed else 0.0
