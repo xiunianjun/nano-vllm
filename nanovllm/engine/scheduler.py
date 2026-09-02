@@ -29,6 +29,7 @@ class Scheduler:
         self.kv_cache_policy = config.kv_cache_policy
         self.enable_cpu_kv_offload = self.kv_cache_policy.cpu_offload
         self.enable_lazy_cpu_kv_writeback = self.kv_cache_policy.lazy_writeback
+        self.enable_gpu_aware_cpu_eviction = config.enable_gpu_aware_cpu_eviction
         target_alloc_blocks = math.ceil(self.max_num_batched_tokens / self.block_size)
         # V3 memory-aware selective writeback 的目标窗口来自 vLLM lazy offload 思路：
         # 一轮 scheduler step 最多新增 target_alloc_blocks 个 KV blocks，再乘 watermark 留冗余。
@@ -153,7 +154,7 @@ class Scheduler:
         assert self.writeback_prefix_blocks is not None
         preferred_cpu_evictions = None
         protected_cpu_evictions = None
-        if self.enable_lazy_cpu_kv_writeback:
+        if self.enable_lazy_cpu_kv_writeback and self.enable_gpu_aware_cpu_eviction:
             gpu_resident, protected = self.block_manager.gpu_residency_for_cpu_eviction(
                 self.lazy_writeback_target_blocks
             )

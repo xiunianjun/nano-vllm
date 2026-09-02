@@ -287,7 +287,27 @@ V2 相比 V1：
 
 上述结论来自单 seed 快速验证，结果目录为 `exp/v3_cpu_blocks40_coarse_20260902_145434/`（旧策略）与 `exp/v3_cpu_gpuaware_16gb_20260902_1535/`（新策略）。
 
-### 7.6 仍需解释的性能现象
+### 7.6 CPU memory boundary 与去重收益
+
+为隔离 GPU-aware CPU eviction 的收益，benchmark 新增 `--no-enable-gpu-aware-cpu-eviction` 消融开关；关闭后 V3 恢复为原来的纯 CPU LRU（Naive V3），其他配置保持不变。固定 hot/cold workload、40-block GPU watermark 和 seed 1，得到：
+
+| Naive V3 CPU cap | CPU blocks | GPU blocks | duplicate | unique | document recompute tokens | prefill | TTFT p90 | request p90 |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 20 GiB | 568 | 224 | 216 | 576 | 66,560 | 13.49s | 84.58ms | 649.08ms |
+| **19 GiB** | 540 | 224 | 224 | 540 | **105,472** | **14.37s** | **91.38ms** | **678.21ms** |
+| 18 GiB | 512 | 224 | 224 | 512 | 156,160 | 15.71s | 135.19ms | 754.29ms |
+
+CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomputed_tokens_est` 是否阶跃上升，再由 prefill time 和 TTFT p90 确认；request latency 只作辅助，因为它还混入 decode、排队和到达过程噪声。从 19 GiB 降到 18 GiB 后，recompute 增加 48.1%、TTFT p90 增加 47.9%、prefill 增加 9.3%，因此 Naive V3 的单-seed 实用边界取 **19 GiB**。若要求末态 CPU+GPU 覆盖全部 576 个 unique blocks，则其严格容量边界约为 **20 GiB**。
+
+最新 GPU-aware V3 的已测实用边界取 **15 GiB**：其 document recompute 为 100,864，与 Naive V3 19 GiB 的 105,472 相当；14 GiB 已升至 130,560。按这一相同的实用性能边界口径，CPU 内存收益为：
+
+1. 原 Naive V3 相比 V2：`20.25 -> 19 GiB`，节省 **1.25 GiB（6.2%）**；
+2. GPU-aware 去重相比 Naive V3：`19 -> 15 GiB`，再节省 **4 GiB（21.1%）**；
+3. 最新 V3 相比 V2：`20.25 -> 15 GiB`，累计节省 **5.25 GiB（25.9%）**。
+
+以上百分比以比较对象的 CPU 内存为分母，使用配置值便于表达；实际 block 对应的 peak 分别约为 20.25、18.98 和 14.98 GiB，结论不变。该边界来自相同 trace 的单 seed 快速定位，适合说明当前 workload 下的容量差异，不应解释为跨 seed 的统计置信区间。
+
+### 7.7 仍需解释的性能现象
 
 - offload 模式 decode total 为 63--66s，高于 baseline 的 47.7s。可能涉及 restore/transfer 对 model step 的干扰、不同 batch/step 形态或 eager-mode 开销，需要单独 profile。
 - achieved throughput 四种模式都约 2.07 req/s，是 arrival-limited 结果，不能外推最大吞吐能力。
@@ -303,12 +323,12 @@ V2 相比 V1：
 2. V2 GPU LRU retention 明确减少 V1 的同步 H2D/restore，prefill 收益可测；在 2 req/s 的低压 Poisson workload 下，端到端 median 收益被 decode 与 arrival limit 稀释。
 3. V3 GPU 安全窗口在当前 workload 下可从保守推导值 130 blocks 缩至 40 blocks；30 blocks 已出现 GPU-only eviction，因此不能继续缩小 request-level 安全窗口。
 4. 16 GiB 下 GPU-aware CPU LRU 将 duplicate 从 199 降至 103、unique coverage 从 480 提至完整的 576 blocks，并用更多 H2D 换取更少 recompute；但迁移 churn 与 GPU-only eviction 同时上升，尚需进一步约束。
-5. V3 的最终 CPU memory 下限仍应在改进 eviction 稳定性后，由固定 40-block GPU watermark 的 CPU hard-cap sweep 评价。
+5. 按 recompute、prefill 和 TTFT 共同确定的实用性能边界，Naive V3 为 19 GiB，GPU-aware V3 为 15 GiB：去重策略再节省 4 GiB（21.1%），最新 V3 相比 V2 的 20.25 GiB 共节省 5.25 GiB（25.9%）。
 
 建议后续按优先级进行：
 
 1. 为 GPU-aware CPU eviction 增加 hysteresis/软保护区，降低刚淘汰 CPU backing 又发生 GPU eviction 的迁移 churn，并用 16 GiB 同 trace 复核 recompute、GPU-only eviction 和 D2H/H2D。
-2. 稳定 eviction 策略后，从 16 GiB 向下扫描 CPU hard cap，以首次出现 document recompute 激增的位置确定容量边界；之后只在边界附近细扫 memory/latency tradeoff。
+2. 用更多 seed 在 14--16 GiB 附近复核 GPU-aware V3 的边界，并在 18--20 GiB 附近复核 Naive V3；当前单-seed 粗扫已将两者的实用边界分别定位为 15 和 19 GiB。
 3. 在不同 seed、arrival rate 和 batch 形态下复核 40 blocks；若需要无需复核即可使用的保守点，采用 60 blocks。
 4. 增加 request-rate sweep，直到接近饱和，分别报告 offered load、achieved throughput、queueing 和 tail latency。
 5. profile offload 模式较高的 decode time，拆分 model runner、transfer 和 scheduler 干扰。
@@ -328,6 +348,10 @@ exp/v3_gpu_blocks30_fast_20260902_143636/
 exp/v3_gpu_blocks40_fast_20260902_144158/
 exp/v3_cpu_blocks40_coarse_20260902_145434/
 exp/v3_cpu_gpuaware_16gb_20260902_1535/
+exp/v3_cpu_gpuaware_8gb_20260902_153724/
+exp/v3_cpu_gpuaware_14gb_20260902_154300/
+exp/v3_cpu_gpuaware_15gb_20260902_154712/
+exp/v3_cpu_naive_boundary_20260902_160124/
 ```
 
-其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是主实验分析入口；GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；两个 CPU 目录保留 16 GiB eviction 策略对照。后续实验必须使用新的时间戳目录，不覆盖已有结果。
+其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是主实验分析入口；GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；CPU 目录保留 GPU-aware 8/14/15/16 GiB sweep 与 Naive V3 18/19/20 GiB 边界数据。后续实验必须使用新的时间戳目录，不覆盖已有结果。

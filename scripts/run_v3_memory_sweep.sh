@@ -12,6 +12,7 @@ SWEEP_STAGE="${SWEEP_STAGE:-gpu}"
 EXP_DIR="${EXP_DIR:-exp/v3_${SWEEP_STAGE}_sweep_$(date +%Y%m%d_%H%M%S)}"
 RUNS="${RUNS:-3}"
 RUN_V2_REFERENCE="${RUN_V2_REFERENCE:-1}"
+GPU_AWARE_CPU_EVICTION="${GPU_AWARE_CPU_EVICTION:-1}"
 
 DOC_LEN="${DOC_LEN:-8192}"
 QUERY_LEN="${QUERY_LEN:-96}"
@@ -66,7 +67,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((PREFILL_BATCH_MULT * PROMPT
 
 mkdir -p "$EXP_DIR"
 
-echo "stage=$SWEEP_STAGE runs=$RUNS run_v2_reference=$RUN_V2_REFERENCE gpu_watermarks='$WATERMARKS' gpu_target_blocks='$GPU_TARGET_BLOCKS' cpu_limits_gb='$ACTIVE_CPU_LIMITS'"
+echo "stage=$SWEEP_STAGE runs=$RUNS run_v2_reference=$RUN_V2_REFERENCE gpu_aware_cpu_eviction=$GPU_AWARE_CPU_EVICTION gpu_watermarks='$WATERMARKS' gpu_target_blocks='$GPU_TARGET_BLOCKS' cpu_limits_gb='$ACTIVE_CPU_LIMITS'"
 echo "hot_documents=$HOT_DOCUMENTS hot_ratio=$HOT_REQUEST_RATIO repeat_count=$HOT_REPEAT_COUNT"
 
 COMMON_ARGS=(
@@ -86,6 +87,9 @@ COMMON_ARGS=(
   --enforce-eager
   --no-use-tqdm
 )
+if [[ "$GPU_AWARE_CPU_EVICTION" == "0" ]]; then
+  COMMON_ARGS+=(--no-enable-gpu-aware-cpu-eviction)
+fi
 
 slug() {
   local value="$1"

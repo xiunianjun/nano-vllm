@@ -231,6 +231,29 @@ class _BlockManagerStub:
 
 
 class SchedulerWritebackProtocolTests(unittest.TestCase):
+    def test_naive_v3_ablation_disables_cpu_eviction_hints(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_lazy_cpu_kv_writeback = True
+        scheduler.enable_gpu_aware_cpu_eviction = False
+        scheduler.lazy_writeback_target_blocks = 40
+        scheduler.block_manager = SimpleNamespace(
+            gpu_residency_for_cpu_eviction=lambda _window: self.fail("unexpected GPU residency query"),
+            mark_cpu_writeback_pending=lambda _entries: None,
+        )
+        scheduler.pending_prefix_writebacks = {}
+        scheduler.pending_writeback_by_block_id = {}
+        scheduler.pending_writeback_by_hash = {}
+        scheduler.metrics = defaultdict(int)
+        captured = []
+        scheduler.writeback_prefix_blocks = lambda entries, preferred, protected: (
+            captured.append((entries, preferred, protected)) or {"writeback_ids": [7], "evicted_hashes": []}
+        )
+
+        accepted = scheduler._submit_prefix_writeback_entries([(11, 3, 256)], release_on_complete=True)
+
+        self.assertEqual(accepted, 1)
+        self.assertEqual(captured, [([(11, 3)], None, None)])
+
     def test_absolute_lazy_writeback_target_overrides_derived_window(self):
         base = dict(
             max_num_seqs=8,
@@ -239,6 +262,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
             kvcache_block_size=256,
             kv_cache_policy=KVCachePolicy.CPU_LAZY_GPU_LRU,
             lazy_writeback_watermark_ratio=0.0,
+            enable_gpu_aware_cpu_eviction=True,
             num_kvcache_blocks=227,
             enable_prefix_cache=True,
         )

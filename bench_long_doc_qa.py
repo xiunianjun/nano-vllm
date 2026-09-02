@@ -48,6 +48,12 @@ def parse_args():
     parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enable-gpu-lru-retention", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enable-lazy-cpu-kv-writeback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--enable-gpu-aware-cpu-eviction",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Prefer evicting redundant GPU-resident CPU entries; disable for the naive V3 ablation.",
+    )
     parser.add_argument("--lazy-writeback-watermark-ratio", type=float, default=0.5)
     parser.add_argument(
         "--lazy-writeback-target-blocks",
@@ -478,6 +484,7 @@ def main():
         enable_cpu_kv_offload=args.enable_cpu_kv_offload,
         enable_gpu_lru_retention=args.enable_gpu_lru_retention,
         enable_lazy_cpu_kv_writeback=args.enable_lazy_cpu_kv_writeback,
+        enable_gpu_aware_cpu_eviction=args.enable_gpu_aware_cpu_eviction,
         lazy_writeback_watermark_ratio=args.lazy_writeback_watermark_ratio,
         lazy_writeback_target_blocks=args.lazy_writeback_target_blocks,
         cpu_prefix_cache_gb_limit=args.cpu_prefix_cache_gb_limit,
@@ -563,6 +570,7 @@ def main():
         "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
         "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
         "enable_lazy_cpu_kv_writeback": args.enable_lazy_cpu_kv_writeback,
+        "enable_gpu_aware_cpu_eviction": args.enable_gpu_aware_cpu_eviction,
         "lazy_writeback_watermark_ratio": args.lazy_writeback_watermark_ratio,
         "lazy_writeback_target_blocks_requested": args.lazy_writeback_target_blocks,
         "cpu_prefix_cache_gb_limit": args.cpu_prefix_cache_gb_limit,

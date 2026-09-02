@@ -46,6 +46,9 @@ class Config:
     enable_gpu_lru_retention: bool = True
     # V3: 不再 prefill 后全量写回 CPU，只维护一段可安全淘汰的 CPU-backed inactive window。
     enable_lazy_cpu_kv_writeback: bool = False
+    # V3 bounded CPU cache: prefer evicting redundant GPU-resident CPU copies.
+    # Disable only for the pure-CPU-LRU ablation.
+    enable_gpu_aware_cpu_eviction: bool = True
     lazy_writeback_watermark_ratio: float = 0.5
     # > 0 时直接指定安全 victim window；0 保持按 max_num_batched_tokens 推导的旧行为。
     lazy_writeback_target_blocks: int = 0
