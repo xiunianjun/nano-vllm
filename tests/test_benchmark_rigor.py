@@ -5,6 +5,9 @@ from types import SimpleNamespace
 import torch
 
 from bench_long_doc_qa import percentile, poisson_arrival_offsets, workload_profile
+from nanovllm.config import KVCachePolicy
+from nanovllm.engine.block_manager import BlockManager
+from nanovllm.engine.sequence import Sequence
 from nanovllm.engine.model_runner import ModelRunner
 from nanovllm.engine.scheduler import Scheduler
 from nanovllm.layers.sampler import Sampler
@@ -79,6 +82,75 @@ class CpuPoolHardCapTests(unittest.TestCase):
         self.assertEqual(runner.prefix_transfer_metrics["cpu_prefix_pool_on_demand_alloc_count"], 0)
 
 
+class _CompletedEvent:
+    def __init__(self):
+        self.synchronize_count = 0
+
+    def synchronize(self):
+        self.synchronize_count += 1
+
+    def query(self):
+        return True
+
+
+class ModelRunnerWritebackBatchTests(unittest.TestCase):
+    def test_one_completed_batch_returns_all_writeback_ids(self):
+        runner = ModelRunner.__new__(ModelRunner)
+        event = _CompletedEvent()
+        runner.pending_prefix_writebacks = [{"ids": [7, 8], "done_event": event}]
+        runner._record_completed_prefix_writeback = lambda pending: [99]
+
+        result = runner.poll_prefix_writebacks(wait=True)
+
+        self.assertEqual(result, {"completed_ids": [7, 8], "evicted_hashes": [99]})
+        self.assertEqual(event.synchronize_count, 1)
+        self.assertEqual(runner.pending_prefix_writebacks, [])
+
+
+class BlockManagerStateTests(unittest.TestCase):
+    def test_sequence_reuses_chained_block_hashes(self):
+        old_block_size = Sequence.block_size
+        Sequence.block_size = 4
+        try:
+            seq = Sequence(list(range(9)))
+            first = seq.block_hash(0)
+            second = seq.block_hash(1)
+            self.assertEqual(first, seq.block_hash(0))
+            self.assertEqual(second, seq.block_hash(1))
+            self.assertEqual(len(seq._block_hashes), 2)
+            self.assertEqual(second, BlockManager.compute_hash([4, 5, 6, 7], first))
+        finally:
+            Sequence.block_size = old_block_size
+
+    def test_evictable_count_tracks_pending_and_activation(self):
+        manager = BlockManager(num_blocks=3, block_size=256)
+        block_ids = []
+        for h in range(3):
+            block_id = manager._allocate_block()
+            manager.blocks[block_id].update(h, [h])
+            manager.release_blocks([block_id])
+            block_ids.append(block_id)
+
+        self.assertEqual(manager._available_block_count(), 3)
+        entries = [(h, block_id, [h]) for h, block_id in enumerate(block_ids)]
+        manager.mark_cpu_writeback_pending(entries)
+        self.assertEqual(manager._available_block_count(), 0)
+        self.assertTrue(manager.blocks[block_ids[0]].writeback_pending)
+        manager.register_cpu_blocks(entries[:1])
+        self.assertEqual(manager._available_block_count(), 1)
+        manager._activate_inactive_block(block_ids[0])
+        self.assertEqual(manager._available_block_count(), 0)
+
+
+class KVCachePolicyTests(unittest.TestCase):
+    def test_legacy_flags_map_to_one_policy(self):
+        self.assertIs(KVCachePolicy.from_flags(False, False, True), KVCachePolicy.GPU_RECOMPUTE)
+        self.assertIs(KVCachePolicy.from_flags(False, True, True), KVCachePolicy.GPU_LRU)
+        self.assertIs(KVCachePolicy.from_flags(True, False, True), KVCachePolicy.CPU_EAGER)
+        self.assertIs(KVCachePolicy.from_flags(True, True, False), KVCachePolicy.CPU_EAGER_GPU_LRU)
+        self.assertIs(KVCachePolicy.from_flags(True, True, True), KVCachePolicy.CPU_LAZY_GPU_LRU)
+
+
 class _BlockManagerStub:
     def __init__(self):
         self.pending = None
@@ -96,6 +168,8 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.block_manager = _BlockManagerStub()
         scheduler.pending_prefix_writebacks = {}
+        scheduler.pending_writeback_by_block_id = {}
+        scheduler.pending_writeback_by_hash = {}
         scheduler.metrics = {
             "pending_prefix_writeback_count": 0,
             "cpu_prefix_cache_evicted_metadata_count": 0,
@@ -110,6 +184,9 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         self.assertEqual(scheduler.block_manager.pending, entries[:1])
         self.assertEqual(scheduler.block_manager.unregistered, [99])
         self.assertEqual(list(scheduler.pending_prefix_writebacks), [41])
+
+        self.assertEqual(scheduler.pending_writeback_by_block_id, {1: 41})
+        self.assertEqual(scheduler.pending_writeback_by_hash, {10: 41})
 
 
 if __name__ == "__main__":

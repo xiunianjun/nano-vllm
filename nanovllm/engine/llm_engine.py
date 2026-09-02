@@ -30,7 +30,7 @@ def _percentile(values, quantile):
 class LLMEngine:
 
     def __init__(self, model, **kwargs):
-        config_fields = {field.name for field in fields(Config)}
+        config_fields = {field.name for field in fields(Config) if field.init}
         config_kwargs = {k: v for k, v in kwargs.items() if k in config_fields}
         config = Config(model, **config_kwargs)
         Sequence.block_size = config.kvcache_block_size
@@ -47,7 +47,7 @@ class LLMEngine:
         self.tokenizer = AutoTokenizer.from_pretrained(config.model, use_fast=True)
         config.eos = self.tokenizer.eos_token_id
         self.scheduler = Scheduler(config)
-        if config.enable_cpu_kv_offload:
+        if config.kv_cache_policy.cpu_offload:
             # Scheduler 只负责调度决策；真正搬 prefix KV tensor 的 D2H/H2D 操作必须在 ModelRunner 里做，
             # 因为 kv_cache tensor、copy stream 和 CUDA event 都属于 model runner 进程/设备上下文。
             self.scheduler.writeback_prefix_blocks = lambda entries: self.model_runner.call("writeback_prefix_blocks", entries)

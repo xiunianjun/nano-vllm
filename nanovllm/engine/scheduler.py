@@ -1,10 +1,22 @@
 from collections import deque
+from dataclasses import dataclass
 import math
 from time import perf_counter
 
 from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence, SequenceStatus
+
 from nanovllm.engine.block_manager import BlockManager
+
+@dataclass(slots=True)
+class PendingPrefixWriteback:
+    prefix_hash: int
+    block_id: int
+    token_ids: list[int]
+    release_on_complete: bool
+    lazy: bool
+
+
 
 
 class Scheduler:
@@ -14,12 +26,9 @@ class Scheduler:
         self.max_num_batched_tokens = config.max_num_batched_tokens
         self.eos = config.eos
         self.block_size = config.kvcache_block_size
-        self.enable_cpu_kv_offload = config.enable_cpu_kv_offload
-        self.enable_lazy_cpu_kv_writeback = (
-            config.enable_cpu_kv_offload
-            and config.enable_gpu_lru_retention
-            and config.enable_lazy_cpu_kv_writeback
-        )
+        self.kv_cache_policy = config.kv_cache_policy
+        self.enable_cpu_kv_offload = self.kv_cache_policy.cpu_offload
+        self.enable_lazy_cpu_kv_writeback = self.kv_cache_policy.lazy_writeback
         target_alloc_blocks = math.ceil(self.max_num_batched_tokens / self.block_size)
         # V3 memory-aware selective writeback 的目标窗口来自 vLLM lazy offload 思路：
         # 一轮 scheduler step 最多新增 target_alloc_blocks 个 KV blocks，再乘 watermark 留冗余。
@@ -35,12 +44,14 @@ class Scheduler:
         # key 是异步 D2H writeback id，value 是本次写回涉及的 prefix blocks；
         # pending 期间这些 GPU blocks 仍保存有效 KV，但不能回到 free list。
         self.pending_prefix_writebacks = {}
+        self.pending_writeback_by_block_id: dict[int, int] = {}
+        self.pending_writeback_by_hash: dict[int, int] = {}
         self.block_manager = BlockManager(
             config.num_kvcache_blocks,
             config.kvcache_block_size,
             config.enable_prefix_cache,
             # 开关含义：V1 关闭 inactive GPU LRU；V2 打开 inactive GPU LRU。
-            config.enable_gpu_lru_retention,
+            self.kv_cache_policy.gpu_lru,
         )
         self.waiting: deque[Sequence] = deque()
         self.running: deque[Sequence] = deque()
@@ -115,27 +126,19 @@ class Scheduler:
     def _pending_writeback_block_ids(self) -> set[int]:
         # 这些 block 的 D2H 已经提交但尚未完成。GPU KV 仍有效，
         # 但不能被 allocator 覆盖；否则 copy stream 可能读到被新请求改写后的内容。
-        return {
-            block_id
-            for pending in self.pending_prefix_writebacks.values()
-            for _h, block_id, _tokens in pending["entries"]
-        }
+        return set(self.pending_writeback_by_block_id)
 
     def _pending_writeback_hashes(self) -> set[int]:
         # 用 hash 去重：同一个 prefix 已经在写回队列里时，不再重复提交 D2H。
-        return {
-            h
-            for pending in self.pending_prefix_writebacks.values()
-            for h, _block_id, _tokens in pending["entries"]
-        }
+        return set(self.pending_writeback_by_hash)
 
     def _mark_pending_writeback_release(self, block_ids: list[int]):
         # request finish/preempt 时，如果某些 block 还在 D2H pending，
         # 不能立刻 release；只把 pending 记录标成“完成后再释放”。
-        block_id_set = set(block_ids)
-        for pending in self.pending_prefix_writebacks.values():
-            if any(block_id in block_id_set for _h, block_id, _tokens in pending["entries"]):
-                pending["release_on_complete"] = True
+        for block_id in block_ids:
+            writeback_id = self.pending_writeback_by_block_id.get(block_id)
+            if writeback_id is not None:
+                self.pending_prefix_writebacks[writeback_id].release_on_complete = True
 
     def _decode_tail_tokens_without_prefix_backing(self, seq: Sequence) -> int:
         # V1 invariant: prompt prefill 完成后，完整 prefix blocks 已经 CPU_RESIDENT 或 WRITEBACK_PENDING。
@@ -158,11 +161,11 @@ class Scheduler:
         # reject the tail when every reserved block is already pending.
         self.block_manager.mark_cpu_writeback_pending(accepted_entries)
         for writeback_id, entry in zip(writeback_ids, accepted_entries):
-            self.pending_prefix_writebacks[writeback_id] = {
-                "entries": [entry],
-                "release_on_complete": release_on_complete,
-                "lazy": lazy,
-            }
+            h, block_id, token_ids = entry
+            pending = PendingPrefixWriteback(h, block_id, token_ids, release_on_complete, lazy)
+            self.pending_prefix_writebacks[writeback_id] = pending
+            self.pending_writeback_by_block_id[block_id] = writeback_id
+            self.pending_writeback_by_hash[h] = writeback_id
         if evicted_hashes:
             self.block_manager.unregister_cpu_blocks(evicted_hashes)
             self.metrics["cpu_prefix_cache_evicted_metadata_count"] += len(evicted_hashes)
@@ -243,15 +246,15 @@ class Scheduler:
             evicted_hashes = []
         for writeback_id in completed_ids:
             pending = self.pending_prefix_writebacks.pop(writeback_id)
-            entries = pending["entries"]
-            # D2H 完成后，才把 prefix 标记为 CPU-resident。
-            # 如果 request 仍在 decode，GPU block 继续归该 request 使用；
-            # 如果 request 已 finish/preempt 并跳过释放，则这里再真正 release。
-            self.block_manager.register_cpu_blocks(entries)
-            if pending.get("lazy", False):
-                self.metrics["lazy_writeback_completed_block_count"] += len(entries)
-            if pending["release_on_complete"]:
-                self.block_manager.release_blocks([block_id for _h, block_id, _tokens in entries])
+            entry = (pending.prefix_hash, pending.block_id, pending.token_ids)
+            self.pending_writeback_by_block_id.pop(pending.block_id, None)
+            if self.pending_writeback_by_hash.get(pending.prefix_hash) == writeback_id:
+                self.pending_writeback_by_hash.pop(pending.prefix_hash)
+            self.block_manager.register_cpu_blocks([entry])
+            if pending.lazy:
+                self.metrics["lazy_writeback_completed_block_count"] += 1
+            if pending.release_on_complete:
+                self.block_manager.release_blocks([pending.block_id])
         if evicted_hashes:
             self.block_manager.unregister_cpu_blocks(evicted_hashes)
             self.metrics["cpu_prefix_cache_evicted_metadata_count"] += len(evicted_hashes)

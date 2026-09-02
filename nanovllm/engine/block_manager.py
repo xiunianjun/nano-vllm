@@ -1,6 +1,4 @@
 from collections import deque, OrderedDict
-import xxhash
-import numpy as np
 
 from nanovllm.engine.sequence import Sequence
 
@@ -12,6 +10,9 @@ class Block:
         self.ref_count = 0
         self.hash = -1
         self.token_ids = []
+        # Keep transfer state on the block instead of duplicating it in a
+        # BlockManager set.
+        self.writeback_pending = False
 
     def update(self, hash: int, token_ids: list[int]):
         self.hash = hash
@@ -21,10 +22,12 @@ class Block:
         self.ref_count = 1
         self.hash = -1
         self.token_ids = []
+        self.writeback_pending = False
 
     def invalidate(self):
         self.hash = -1
         self.token_ids = []
+        self.writeback_pending = False
 
 
 class BlockManager:
@@ -41,13 +44,14 @@ class BlockManager:
         # free: 没有任何有效 KV，可直接分配给新 request/prefill 覆盖。
         self.free_block_ids: deque[int] = deque(range(num_blocks))
         # active: 正在被 running/waiting request 引用；ref_count > 0 时不能被 LRU 淘汰。
-        self.active_block_ids: set[int] = set()
         # inactive LRU: request 已释放引用，但 GPU KV 和 hash 仍有效。
         # OrderedDict 左侧是最久未使用的 victim，右侧是最近释放/命中的 block。
         self.inactive_block_ids: OrderedDict[int, None] = OrderedDict()
         # D2H pending 的 inactive block 不能被覆盖；等 CUDA event 完成后，
         # Scheduler 会 register_cpu_blocks()，它才变成“可安全淘汰”的 CPU-backed victim。
-        self.pending_cpu_writeback_block_ids: set[int] = set()
+        # O(1) decode admission: the old path scanned the full inactive LRU
+        # for every generated token.
+        self.evictable_inactive_block_count = 0
         self.reset_metrics()
 
     def reset_metrics(self):
@@ -65,9 +69,9 @@ class BlockManager:
         metrics = dict(self.metrics)
         inactive_cpu_backed = sum(
             1 for block_id in self.inactive_block_ids
-            if block_id not in self.pending_cpu_writeback_block_ids and self._is_cpu_backed(block_id)
+            if not self.blocks[block_id].writeback_pending and self._is_cpu_backed(block_id)
         )
-        inactive_pending = sum(1 for block_id in self.inactive_block_ids if block_id in self.pending_cpu_writeback_block_ids)
+        inactive_pending = sum(1 for block_id in self.inactive_block_ids if self.blocks[block_id].writeback_pending)
         metrics["gpu_lru_cached_block_count"] = len(self.inactive_block_ids)
         metrics["inactive_cpu_backed_block_count"] = inactive_cpu_backed
         metrics["inactive_gpu_only_block_count"] = len(self.inactive_block_ids) - inactive_cpu_backed - inactive_pending
@@ -81,11 +85,7 @@ class BlockManager:
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
-        h = xxhash.xxh64()
-        if prefix != -1:
-            h.update(prefix.to_bytes(8, "little"))
-        h.update(np.array(token_ids).tobytes())
-        return h.intdigest()
+        return Sequence.compute_hash(token_ids, prefix)
 
     def _remove_hash_mapping(self, block_id: int):
         block = self.blocks[block_id]
@@ -93,14 +93,15 @@ class BlockManager:
             del self.hash_to_block_id[block.hash]
 
     def _available_block_count(self, exclude_block_ids: set[int] | None = None) -> int:
-        exclude_block_ids = exclude_block_ids or set()
         # 可分配容量 = 真正 free 的 blocks + 可以被淘汰的 inactive LRU blocks。
         # exclude_block_ids 是本次 allocate 中已经作为 GPU hit 复用的 blocks，不能又被选作 victim。
-        inactive = sum(
-            1 for block_id in self.inactive_block_ids
-            if block_id not in exclude_block_ids and block_id not in self.pending_cpu_writeback_block_ids
-        )
-        return len(self.free_block_ids) + inactive
+        available = len(self.free_block_ids) + self.evictable_inactive_block_count
+        if exclude_block_ids:
+            available -= sum(
+                block_id in self.inactive_block_ids and not self.blocks[block_id].writeback_pending
+                for block_id in exclude_block_ids
+            )
+        return available
 
     # 实际抢占逻辑
     def _allocate_block(self, exclude_block_ids: set[int] | None = None) -> int:
@@ -114,13 +115,11 @@ class BlockManager:
         # 被重新分配后，这个物理 block 上的旧 hash 不再代表有效 prefix cache。
         self._remove_hash_mapping(block_id)
         block.reset()
-        self.active_block_ids.add(block_id)
         return block_id
 
     def _deallocate_block(self, block_id: int):
         block = self.blocks[block_id]
         assert block.ref_count == 0
-        self.active_block_ids.remove(block_id)
         self._remove_hash_mapping(block_id)
         block.invalidate()
         self.free_block_ids.append(block_id)
@@ -128,11 +127,12 @@ class BlockManager:
     def _deactivate_block(self, block_id: int):
         block = self.blocks[block_id]
         assert block.ref_count == 0 and block.hash != -1
-        self.active_block_ids.remove(block_id)
         # V2 的关键点：release request 引用时不清 KV、不删 hash，而是放入 inactive LRU。
         # 后续相同 prefix 再来，可以直接 GPU hit；显存紧张时再按 LRU victim 覆盖。
         self.inactive_block_ids[block_id] = None
         self.inactive_block_ids.move_to_end(block_id)
+        if not block.writeback_pending:
+            self.evictable_inactive_block_count += 1
         self.metrics["gpu_lru_cached_block_peak"] = max(
             self.metrics["gpu_lru_cached_block_peak"], len(self.inactive_block_ids)
         )
@@ -143,8 +143,9 @@ class BlockManager:
         # inactive block 被 prefix lookup 命中后重新变成 active 引用。
         # 这里不需要任何 H2D copy，因为 KV 一直留在 GPU 上。
         self.inactive_block_ids.pop(block_id)
+        if not block.writeback_pending:
+            self.evictable_inactive_block_count -= 1
         block.ref_count = 1
-        self.active_block_ids.add(block_id)
         self.metrics["gpu_lru_hit_block_count"] += 1
         self.metrics["gpu_lru_hit_token_count"] += self.block_size
 
@@ -153,7 +154,7 @@ class BlockManager:
         return block.hash != -1 and self.has_cpu_block(block.hash, block.token_ids)
 
     def _is_safe_or_pending_victim(self, block_id: int) -> bool:
-        return block_id in self.pending_cpu_writeback_block_ids or self._is_cpu_backed(block_id)
+        return self.blocks[block_id].writeback_pending or self._is_cpu_backed(block_id)
 
     def victim_window_safe_or_pending_count(self, target_safe_blocks: int) -> int:
         # V3 只关心 LRU victim 前沿，而不是整个 inactive 队列。
@@ -179,7 +180,7 @@ class BlockManager:
         for i, block_id in enumerate(self.inactive_block_ids):
             if i >= target_safe_blocks or len(entries) >= deficit:
                 break
-            if block_id in self.pending_cpu_writeback_block_ids:
+            if self.blocks[block_id].writeback_pending:
                 continue
             block = self.blocks[block_id]
             # 三类 block 不需要再次写回：无有效 hash、相同 hash 已在 pending、CPU 已有 backing。
@@ -192,7 +193,12 @@ class BlockManager:
     def mark_cpu_writeback_pending(self, entries):
         # D2H 提交后立即 protected，防止 allocator 在 copy 完成前覆盖该 GPU block。
         for _h, block_id, _tokens in entries:
-            self.pending_cpu_writeback_block_ids.add(block_id)
+            block = self.blocks[block_id]
+            if block.writeback_pending:
+                continue
+            block.writeback_pending = True
+            if block_id in self.inactive_block_ids:
+                self.evictable_inactive_block_count -= 1
 
     def _evict_inactive_block(self, exclude_block_ids: set[int] | None = None) -> int:
         exclude_block_ids = exclude_block_ids or set()
@@ -203,13 +209,14 @@ class BlockManager:
         for block_id in self.inactive_block_ids:
             # exclude 是本次 allocate 已经命中的 GPU prefix，pending 是 copy stream 正在读取的 block；
             # 两者都不能在同一次 allocation 里被选成 victim。
-            if block_id in exclude_block_ids or block_id in self.pending_cpu_writeback_block_ids:
+            if block_id in exclude_block_ids or self.blocks[block_id].writeback_pending:
                 continue
             victim = block_id
             break
         assert victim is not None
         was_cpu_backed = self._is_cpu_backed(victim)
         self.inactive_block_ids.pop(victim)
+        self.evictable_inactive_block_count -= 1
         # victim 被覆盖前必须删掉 GPU hash mapping，否则后续会误判成 GPU hit。
         self._remove_hash_mapping(victim)
         self.blocks[victim].invalidate()
@@ -229,13 +236,12 @@ class BlockManager:
                 return None
             return {"sources": []}
 
-        h = -1
         sources = []
         gpu_source_block_ids = set()
         free_needed = seq.num_blocks
         for local_block_idx in range(seq.num_blocks - 1):
             block_token_ids = seq.block_token_ids(local_block_idx)
-            h = self.compute_hash(block_token_ids, h)
+            h = seq.block_hash(local_block_idx)
             global_block_id = self.hash_to_block_id.get(h, -1)
 
             if global_block_id != -1 and self.blocks[global_block_id].token_ids == block_token_ids:
@@ -315,7 +321,11 @@ class BlockManager:
         # ModelRunner 确认 D2H 完成后调用：metadata 与真实 CPU tensor 同步可见。
         # discard pending 后，该 inactive block 就能作为 CPU-backed victim 被优先淘汰。
         for h, global_block_id, block_token_ids in entries:
-            self.pending_cpu_writeback_block_ids.discard(global_block_id)
+            block = self.blocks[global_block_id]
+            if block.writeback_pending:
+                block.writeback_pending = False
+                if global_block_id in self.inactive_block_ids:
+                    self.evictable_inactive_block_count += 1
             self.cpu_hash_to_token_ids[h] = block_token_ids
 
     def unregister_cpu_blocks(self, hashes):
@@ -363,12 +373,11 @@ class BlockManager:
         end = (seq.num_cached_tokens + seq.num_scheduled_tokens) // self.block_size
         if start == end:
             return
-        h = self.blocks[seq.block_table[start - 1]].hash if start > 0 else -1
         for local_block_idx in range(start, end):
             global_block_id = seq.block_table[local_block_idx]
             block = self.blocks[global_block_id]
             block_token_ids = seq.block_token_ids(local_block_idx)
             # block 只有写满后才进入 prefix cache。hash 串上前一个 block hash，保证只能连续 prefix 命中。
-            h = self.compute_hash(block_token_ids, h)
+            h = seq.block_hash(local_block_idx)
             block.update(h, block_token_ids)
             self.hash_to_block_id[h] = global_block_id

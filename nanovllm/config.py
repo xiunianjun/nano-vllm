@@ -1,6 +1,29 @@
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from transformers import AutoConfig
+
+
+class KVCachePolicy(Enum):
+    GPU_RECOMPUTE = (False, False, False, "gpu_prefix_cache_recompute_baseline")
+    GPU_LRU = (False, True, False, "gpu_prefix_cache_recompute_baseline")
+    CPU_EAGER = (True, False, False, "cpu_prefix_cache_v1")
+    CPU_EAGER_GPU_LRU = (True, True, False, "cpu_prefix_cache_v2_lru")
+    CPU_LAZY_GPU_LRU = (True, True, True, "cpu_prefix_cache_v3_lazy_writeback")
+
+    def __init__(self, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool, benchmark_mode: str):
+        self.cpu_offload = cpu_offload
+        self.gpu_lru = gpu_lru
+        self.lazy_writeback = lazy_writeback
+        self.benchmark_mode = benchmark_mode
+
+    @classmethod
+    def from_flags(cls, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool):
+        if not cpu_offload:
+            return cls.GPU_LRU if gpu_lru else cls.GPU_RECOMPUTE
+        if not gpu_lru:
+            return cls.CPU_EAGER
+        return cls.CPU_LAZY_GPU_LRU if lazy_writeback else cls.CPU_EAGER_GPU_LRU
 
 
 @dataclass(slots=True)
@@ -28,6 +51,7 @@ class Config:
     cpu_prefix_cache_gb_limit: float = 0.0
     # > 0 时预分配固定容量 pinned CPU KV block pool，避免 writeback 热路径临时 pin_memory 分配。
     cpu_prefix_pool_gb: float = 0.0
+    kv_cache_policy: KVCachePolicy = field(init=False)
 
     def __post_init__(self):
         assert os.path.isdir(self.model)
@@ -36,6 +60,11 @@ class Config:
         assert self.lazy_writeback_watermark_ratio >= 0
         assert self.cpu_prefix_cache_gb_limit >= 0
         assert self.cpu_prefix_pool_gb >= 0
+        self.kv_cache_policy = KVCachePolicy.from_flags(
+            self.enable_cpu_kv_offload,
+            self.enable_gpu_lru_retention,
+            self.enable_lazy_cpu_kv_writeback,
+        )
         if self.enable_cpu_kv_offload and self.cpu_prefix_cache_gb_limit > 0:
             # A configured CPU cache limit is also a physical pinned-memory cap.
             # Use a fixed pool so the writeback path cannot allocate beyond it.

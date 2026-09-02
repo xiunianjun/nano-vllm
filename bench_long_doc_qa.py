@@ -10,6 +10,7 @@ import torch
 from transformers import AutoConfig, AutoTokenizer
 
 from nanovllm import LLM, SamplingParams
+from nanovllm.config import KVCachePolicy
 
 
 GB = 1 << 30
@@ -366,6 +367,11 @@ def workload_profile(doc_ids, args, bytes_per_token):
 
 def main():
     args = parse_args()
+    kv_cache_policy = KVCachePolicy.from_flags(
+        args.enable_cpu_kv_offload,
+        args.enable_gpu_lru_retention,
+        args.enable_lazy_cpu_kv_writeback,
+    )
     if args.warmup_mode == "stream" and not 0 <= args.stream_warmup_ratio < 1:
         raise ValueError("--stream-warmup-ratio must be in [0, 1)")
     if args.arrival_mode == "poisson" and (args.request_rate is None or args.request_rate <= 0):
@@ -546,15 +552,7 @@ def main():
 
     result = {
         "model": args.model,
-        "mode": (
-            "cpu_prefix_cache_v3_lazy_writeback"
-            if args.enable_cpu_kv_offload and args.enable_gpu_lru_retention and args.enable_lazy_cpu_kv_writeback
-            else "cpu_prefix_cache_v2_lru"
-            if args.enable_cpu_kv_offload and args.enable_gpu_lru_retention
-            else "cpu_prefix_cache_v1"
-            if args.enable_cpu_kv_offload
-            else "gpu_prefix_cache_recompute_baseline"
-        ),
+        "mode": kv_cache_policy.benchmark_mode,
         "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
         "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
         "enable_lazy_cpu_kv_writeback": args.enable_lazy_cpu_kv_writeback,

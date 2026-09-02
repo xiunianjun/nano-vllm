@@ -41,7 +41,7 @@ bench_long_doc_qa.py
 scripts/run_prefix_cache_cases.sh
 ```
 
-`bench_long_doc_qa.py` 负责生成 synthetic long-doc / branching workload，并输出 JSON metrics。`scripts/run_prefix_cache_cases.sh` 负责批量跑 baseline / V1 / V2，并为每个 case 生成 `summary.json`。
+`bench_long_doc_qa.py` 负责生成 synthetic long-doc / branching workload，并输出 JSON metrics。`scripts/run_prefix_cache_cases.sh` 负责批量跑 baseline / V1 / V2 / V3，并为每个 case 生成 `summary.json`。
 
 ## V1 实现
 
@@ -107,16 +107,14 @@ V3 在 V2 LRU 上只做一个优化：memory-aware selective writeback。
 
 核心变化：不再 prefill 后全量写回 CPU，而是只给最可能被回收的 inactive GPU blocks 做 lazy D2H。动机是 CPU cache 也有限，V1/V2 的全量 backing 会让大量“GPU 上已经保留、短期不需要 CPU 副本”的 KV 占住 CPU 空间，反而挤掉更有价值的 prefix，甚至迫使它们被丢弃或下沉到更慢层级。V3 希望把 CPU 空间优先留给即将失去 GPU 副本、且未来仍可能复用的 KV，同时减少不必要的 PCIe D2H 流量。
 
-Lazy writeback 的触发时机参考 vLLM simple CPU offload：每个 scheduler iteration 完成 scheduling/allocation 后，在 connector metadata 构建阶段统一检查一次，而不是某个 block 被 allocate 时立刻 D2H。
+Lazy writeback 的触发时机参考 vLLM simple CPU offload 的 safety-window 思路，但当前 nano-vLLM 实现更保守：只在一次 allocation 之后发现 free blocks 低于目标水位时，才扫描 inactive LRU 前沿并补一批异步 D2H。这样避免每个 decode step 都做 lazy window 维护。
 
 ```text
 scheduler step
-  -> allocation / scheduling
-  -> build_connector_meta(scheduler_output)
-  -> prepare_store_specs()
-  -> _prepare_lazy_store_specs()
-  -> 扫描 GPU inactive/free 队列前沿
-  -> 批量挑选 blocks 异步写回 CPU
+  -> allocation 真的发生
+  -> free blocks < target_free
+  -> 扫描 inactive LRU victim window
+  -> 挑选 GPU-only victim blocks 异步写回 CPU
 ```
 
 核心阈值也参考 vLLM，不写死固定 block 数，而是按单轮 scheduler step 可能新增的最大 KV blocks 估算 safety window：
@@ -129,6 +127,23 @@ target_free   = target_blocks * (1 + lazy_writeback_watermark_ratio)
 vLLM 当前 lazy CPU offload 使用 `lazy_writeback_watermark_ratio = 1.0`，即大约保留 `2 * ceil(max_num_batched_tokens / block_size)` 个 already-backed inactive/free blocks。我们的场景里 `max_num_batched_tokens` 可能为了长 prompt 设得偏宽，直接用 `1.0` 会比较激进，容易提前复制过多 KV 到 CPU。因此 V3 不再只看单个默认值，而是把 watermark 当成实验变量。
 
 当 already-backed window 不足时，从 inactive LRU 的 eviction end 选择 GPU-only blocks，批量异步 D2H。这样 GPU 需要腾空间时，可以优先淘汰 already-backed blocks，避免在关键路径上同步 D2H；同时又不会像 V1/V2 那样把所有 prefix 都常驻 CPU。
+
+实现上新增 pinned CPU block pool：设置 `cpu_prefix_pool_gb > 0` 后，初始化阶段预分配固定数量的 pinned CPU KV blocks，writeback 热路径只从 pool 取 buffer，不再临时 `torch.empty(..., pin_memory=True)`。CPU LRU 淘汰时释放的是有效 backing，并把 pooled buffer 还回 free list。
+
+### V3 性能 Bug 记录
+
+早期 V3 lazy writeback 虽然使用异步 D2H，但在 scheduler 热路径里逐 block 临时分配 pinned CPU tensor，导致 `schedule_time` 从 V2 的约 `0.54s` 放大到数秒级。profile 后确认主要开销来自 `torch.empty(..., pin_memory=True)`，而不是 CUDA copy 本身；改为初始化阶段预分配 `cpu_prefix_pool_gb` 后，V3 的调度开销基本回到 V2 同级。后续实验需要同时报告有效 CPU cache 占用和预分配 pool 容量，避免把 reserved memory 误读成实际 cached KV。
+
+### 热路径优化（2026-09-02）
+
+- decode admission 用可驱逐 block 计数替代每 token 扫描 inactive LRU。
+- decode 阶段复用 pinned CPU/CUDA buffers；CUDA Graph 直接填充 graph backing buffers。
+- writeback pending record 改为具名结构和直接索引，allocator pending 状态收敛到 `Block`，移除重复 active/pending sets；哈希命中后的 token 比对继续保留碰撞保护。
+- Qwen3-0.6B 短测中吞吐从 `10.0350` 提升到 `10.1480 req/s`（`+1.13%`），query elapsed 从 `0.7972s` 降至 `0.7883s`（`-1.11%`）；输出/trace 哈希与 cache 行为一致。该短测使用 `--enforce-eager`，未覆盖 CUDA Graph 部分收益。
+- D2H writeback 改为每批共享 CUDA events（event 数从 `1+2N` 降为固定 `3`）；同参数确认轮中 event/submit/lazy-maintain 局部耗时分别下降约 `14%/19%/15%`，但端到端吞吐比上一轮低 `0.44%`，短测尚不能证明整体收益。
+- `Sequence` 缓存连续完整 block 的 chained hash，prefix lookup 与 `hash_blocks` 复用同一结果，避免 miss/retry 路径重复构造 NumPy 数组并计算 xxhash；token_ids 比对仍作为 hash collision 保护。
+- 三个兼容 CLI 开关在配置入口统一映射为 `KVCachePolicy`，Scheduler、BlockManager、LLMEngine 和 benchmark mode 不再各自重复拼接 V1/V2/V3 条件；无效组合按既有语义归一化，旧脚本无需修改。
+- 第 7/8 项用相同 Qwen3-0.6B 短测确认两轮：平均吞吐 `9.9529 req/s`、query elapsed `0.8038s`，相对第 5 项确认轮分别为 `-1.49%/+1.51%`；schedule time 平均反而小幅下降 `0.29%`，波动来自 model runner time 增加 `1.54%`。因此本轮结论是调度侧重构正确但端到端无可证明提速；两轮输出/trace 哈希及 GPU hit、CPU restore、eviction、writeback 数均完全一致。
 
 V3 block 状态：
 
@@ -146,6 +161,7 @@ dropped                   -> CPU/GPU 都没有，后续只能 recompute
 ```text
 lazy_writeback_watermark_ratio = 0.5
 cpu_prefix_cache_gb_limit
+cpu_prefix_pool_gb
 ```
 
 后续扫描 `lazy_writeback_watermark_ratio = 0 / 0.25 / 0.5 / 1.0`。`0` 只覆盖一轮最大 allocation demand，`1.0` 对齐 vLLM 的 100% watermark；中间值用于观察 CPU 占用和同步 swapin 的折中。暂不把 `2.0` 作为主扫描点，除非需要专门验证更保守窗口对 sync swapin 的上限收益。
@@ -161,8 +177,13 @@ evict_already_backed_block_count
 evict_gpu_only_sync_writeback_block_count
 evict_gpu_only_drop_block_count
 cpu_cache_evicted_block_count
-cpu_prefix_kv_gb / cpu_prefix_kv_gb_peak
+cpu_prefix_cache_live_gb / cpu_prefix_cache_live_gb_peak
+cpu_prefix_pool_reserved_gb
+cpu_prefix_pool_free_block_count / cpu_prefix_pool_used_block_count
+cpu_prefix_pool_on_demand_alloc_count
 ```
+
+内存指标语义：`live_gb` 是当前真正有效、可命中的 CPU prefix backing；`reserved_gb` 是预分配 pinned pool 的物理容量。论文图表优先看 `live_gb/live_gb_peak`，工程排障同时看 `reserved_gb` 和 `on_demand_alloc_count`。
 
 V3 的 benchmark 不只看速度，还要看 memory-latency tradeoff：在相同 cache pressure 下，扫描 `lazy_writeback_watermark_ratio` 和 `cpu_prefix_cache_gb_limit`，找到 CPU memory 明显低于 V2、但 sync swapin / TTFT / request latency 接近 V2 的参数区间。`cpu_prefix_cache_gb_limit = 0` 表示不限制 CPU cache，用作上界对照。
 
@@ -172,7 +193,7 @@ V3 的 benchmark 不只看速度，还要看 memory-latency tradeoff：在相同
 scripts/run_v3_memory_sweep.sh
 ```
 
-默认扫描 `watermark = 0 / 0.25 / 0.5 / 1.0` 和 `CPU limit = 3 / 5 / 7 / unlimited GB`。本轮不再做 document length sweep，优先固定 `document_length = 8192`；同时把 `target_working_set_gb` 和 `gpu_kv_cache_gb` 等比例放大到 `12.0 / 4.8`，保持 working set/GPU 约 `2.5x`、单 prompt/GPU 约 `24%`。这样 cache pressure 主要来自更多 documents，而不是少量超长 request。
+默认脚本现在固定 `watermark = 0.5`，扫描 `CPU limit = 20 / 12 / 11 / 10.5 / 10 / 5 / 3 / 2 / 1 GB`；其它 watermark 只在需要复查 GPU safety window 时手动覆盖。本轮不再做 document length sweep，优先固定 `document_length = 8192`；同时把 `target_working_set_gb` 和 `gpu_kv_cache_gb` 放到 `20.0 / 8.0`，保持 working set/GPU 约 `2.5x`、单 prompt/GPU 约 `14%`。这样 cache pressure 主要来自更多 documents，而不是少量超长 request。`cpu_prefix_pool_gb` 需要覆盖实验可能达到的 live backing 峰值并按 block 粒度留余量；例如本轮 actual working set 是 20.25GB，设置 20GB 会出现少量 on-demand allocation，21GB 才能完全走 pool。
 
 ## V4 设计：调度感知 Prefetch / OPT Eviction
 
@@ -251,109 +272,165 @@ working_set_KV ~= num_documents * reusable_prefix_length * kv_bytes_per_token
 
 ## 实验结果
 
-### V2 LRU Doc Length Sweep
+### 当前可复用结果：8K Serving 对比
 
-本轮结果目录：
+结果目录：
 
 ```text
-exp/cpu_kv_memory_doclen_sweep_20260901_095444/
+exp/prefix_cache_serving_20260901_181816/
 ```
 
-目的：在 serving-style Poisson arrival 下，比较 V1 CPU offload 与 V2 GPU LRU retention，并补充 CPU prefix cache 内存占用。按照你的要求，本轮跑完 16K 后停止；这轮不包含 recompute baseline，主要看 `V2 vs V1`。
-
-定位更新：这轮 doc length sweep 更适合作为 prefix length sensitivity / sanity，不再作为后续主实验变量。后续主实验应固定 document length 和 GPU KV budget，通过改变 `working_set_KV / GPU_KV` 来扫描 cache pressure。
+这轮结果是当前主口径：Poisson arrival、continuous batching、8K document prefix，同时包含 recompute baseline / V1 / V2 / V3。后续图表和结论优先使用这一轮。
 
 基础配置：
 
 ```text
 model = /data/datasets/models-hf/Qwen3-8B
 runs = 2
-document_length = 4096 / 8192 / 16384
+document_length = 8192
 query_length = 96
 output_len = 16
-gpu_kv_cache_gb_requested = 24
+target_working_set_gb = 20.0
+gpu_kv_cache_gb = 8.0
 max_num_seqs = 8
-request_rate = 2 req/s
+max_num_batched_tokens = 33152
 arrival_mode = poisson
+request_rate = 2 req/s
+lazy_writeback_watermark_ratio = 0.5
+cpu_prefix_cache_gb_limit = 0
 ```
 
-`max_num_batched_tokens` 随输入长度放大：4K/8K 使用 `33152`，16K 使用 `65920`，约等于一次允许 4 个长 prompt 的 prefill batch。
+参数检查：单 prompt 约占 GPU KV 的 `14.3%`，估算可同时容纳 `6` 个完整 prompt；working set/GPU 约 `2.54x`。V3 lazy target 为 `195 blocks`，小于实际 `227 blocks`，不再出现旧版 target window 大于总 GPU blocks 的问题。
 
 图表：
 
-![V2 vs V1 swapin reduction](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/v2_vs_v1_swapin_reduction.svg)
+![Measured prefill total time](exp/prefix_cache_serving_20260901_181816/figures/prefill_total.svg)
 
-![V2 vs V1 latency speedup by doc length](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/v2_vs_v1_latency_speedup_doclen.svg)
+![Median TTFT](exp/prefix_cache_serving_20260901_181816/figures/ttft_median.svg)
 
-![CPU prefix KV memory by doc length](exp/cpu_kv_memory_doclen_sweep_20260901_095444/figures/cpu_prefix_kv_memory_doclen.svg)
+![Synchronous CPU restore blocks](exp/prefix_cache_serving_20260901_181816/figures/sync_swapin_blocks.svg)
 
-CPU 内存图使用 `cpu_prefix_kv_gb.mean`，即 2 次运行的最终 CPU prefix cache 占用均值。当前实现 measured 阶段不释放 CPU backing，因此该值基本也等同于 `cpu_prefix_kv_gb_peak.mean`，不是时间平均内存。
+![Peak CPU prefix KV memory](exp/prefix_cache_serving_20260901_181816/figures/cpu_memory_peak.svg)
 
-参数检查：
+核心结果为 2 次运行均值。TTFT/request/queueing 是 measured requests 的 per-request 分布统计；`prefill total` 是 measured 阶段所有 prefill step 的总 wall time。
 
-| doc | case | docs/branches | CPU KV GB | WS/GPU | single prompt GB | single/GPU | fit count |
-|---:|---|---:|---:|---:|---:|---:|---:|
-| 4096 | case0 | 1 | 0.562 | 0.02 | 0.578 | 2.4% | 41 |
-| 4096 | cascade | 43 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
-| 4096 | hot/cold | 43 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
-| 4096 | branching | 85 | 24.188 | 1.01 | 0.578 | 2.4% | 41 |
-| 8192 | case0 | 1 | 1.125 | 0.05 | 1.140 | 4.8% | 21 |
-| 8192 | cascade | 29 | 32.625 | 1.36 | 1.140 | 4.8% | 21 |
-| 8192 | hot/cold | 29 | 32.625 | 1.36 | 1.140 | 4.8% | 21 |
-| 8192 | branching | 56 | 32.062 | 1.34 | 1.140 | 4.8% | 21 |
-| 16384 | case0 | 1 | 2.250 | 0.09 | 2.265 | 9.4% | 10 |
-| 16384 | cascade | 22 | 49.500 | 2.06 | 2.265 | 9.4% | 10 |
-| 16384 | hot/cold | 22 | 49.500 | 2.06 | 2.265 | 9.4% | 10 |
-| 16384 | branching | 42 | 48.375 | 2.02 | 2.265 | 9.4% | 10 |
+| case | mode | docs / requests | recompute tok | CPU restore tok | sync swapin blocks | GPU LRU hit tok | CPU peak | prefill total | median TTFT | min TTFT | median req latency | queue avg / max |
+|---|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| case0 | baseline | 1 / 1 | 0 | 0 | 0 | 8,192 | 0.00 GB | 0.066s | 0.103s | 0.103s | 0.584s | 0.000 / 0.000s |
+| case0 | V1 | 1 / 1 | 0 | 8,192 | 32 | 0 | 1.12 GB | 0.073s | 0.100s | 0.100s | 0.476s | 0.000 / 0.000s |
+| case0 | V2 | 1 / 1 | 0 | 0 | 0 | 8,192 | 1.12 GB | 0.050s | 0.079s | 0.079s | 0.467s | 0.000 / 0.000s |
+| case0 | V3 | 1 / 1 | 0 | 0 | 0 | 8,192 | 0.00 GB | 0.049s | 0.076s | 0.076s | 0.457s | 0.000 / 0.000s |
+| cascade | baseline | 18 / 18 | 147,456 | 0 | 0 | 0 | 0.00 GB | 4.507s | 0.420s | 0.277s | 1.180s | 0.066 / 0.236s |
+| cascade | V1 | 18 / 18 | 0 | 147,456 | 576 | 0 | 20.25 GB | 1.106s | 0.111s | 0.085s | 0.521s | 0.013 / 0.051s |
+| cascade | V2 | 18 / 18 | 0 | 147,456 | 576 | 0 | 20.25 GB | 1.136s | 0.104s | 0.085s | 0.548s | 0.013 / 0.063s |
+| cascade | V3 | 18 / 18 | 49,664 | 97,792 | 382 | 0 | 14.59 GB | 7.157s | 2.205s | 0.221s | 2.609s | 1.302 / 3.749s |
+| hot/cold | baseline | 18 / 72 | 148,608 | 0 | 0 | 355,200 | 0.00 GB | 6.307s | 0.081s | 0.061s | 0.613s | 0.021 / 0.257s |
+| hot/cold | V1 | 18 / 72 | 0 | 516,096 | 2,016 | 0 | 20.25 GB | 3.958s | 0.095s | 0.063s | 0.526s | 0.011 / 0.057s |
+| hot/cold | V2 | 18 / 72 | 0 | 147,968 | 578 | 359,936 | 20.25 GB | 2.923s | 0.080s | 0.062s | 0.510s | 0.009 / 0.031s |
+| hot/cold | V3 | 18 / 72 | 49,920 | 115,584 | 452 | 264,576 | 19.12 GB | 8.081s | 0.129s | 0.062s | 0.830s | 0.279 / 2.800s |
+| branching | baseline | 35 / 140 | 90,240 | 0 | 0 | 614,272 | 0.00 GB | 7.550s | 0.081s | 0.061s | 0.537s | 0.013 / 0.160s |
+| branching | V1 | 35 / 140 | 0 | 681,984 | 2,664 | 0 | 20.25 GB | 7.203s | 0.093s | 0.062s | 0.537s | 0.011 / 0.062s |
+| branching | V2 | 35 / 140 | 0 | 90,240 | 352 | 599,936 | 20.25 GB | 5.471s | 0.079s | 0.060s | 0.507s | 0.011 / 0.047s |
+| branching | V3 | 35 / 140 | 46,336 | 43,904 | 172 | 546,688 | 16.88 GB | 9.820s | 0.090s | 0.061s | 0.579s | 0.036 / 0.777s |
 
-结论：8K/16K 的所有 case 都没有靠“单个 request 塞满 HBM”制造压力。16K 单 prompt 约 2.27GB，只占 24GB GPU KV 的 9.4%，估算可同时容纳约 10 个完整 prompt；cache pressure 主要来自更多 documents/branches 形成的总 working set。
+对比结论：
 
-核心结果均为 2 次运行均值。TTFT/request/queueing 是 measured requests 的 per-request 分布统计；`prefill total` 是 measured 阶段所有 prefill step 的总 wall time。
+- `case0_functional` 通过：同一 document 第二次访问能复用 prefix。V3 没有写 CPU 是合理的，因为单文档一直留在 GPU，不需要 backing。
+- `cascade_tile` 是 LRU 无效边界 case。V1/V2 都需要完整同步 restore；V3 可以少存约 `5.66 GB` CPU KV，但因为部分 prefix 没有 backing，会回到 recompute，TTFT 和排队尾延迟明显变差。
+- `hot_cold_sharing` 是主目标 case。V2 相比 V1 把同步 swapin blocks 从 `2016` 降到 `578`，约 `71%`；prefill total 从 `3.96s` 降到 `2.92s`。V3 只省约 `1.12 GB` CPU，但引入 `49,920` recompute tokens，当前 watermark=0.5 不是好参数点。
+- `branching_prefix_sharing` 也符合预期。V2 相比 V1 把同步 swapin blocks 从 `2664` 降到 `352`，约 `87%`；prefill total 从 `7.20s` 降到 `5.47s`。V3 省 `3.38 GB` CPU，但同样产生 recompute，需要后续 sweep 找折中。
+- 当前 V2 的性能提升数字是可信的：queueing latency 整体较低，说明这轮不是旧版一次性批量提交造成的大排队；收益主要来自减少关键路径 CPU restore 和增加 GPU LRU hit。
+- 当前 V3 的功能逻辑可用，但默认参数不是最终结论。下一轮 V3 应扫描 watermark 和 CPU limit，用 memory-latency tradeoff 选点，而不是只看 `0.5 / unlimited CPU`。
 
-| doc | case | V1 swapin req/tok | V2 swapin req/tok | swapin token drop | V2 LRU hit tok | V1 TTFT avg/med/min | V2 TTFT avg/med/min | V1 req avg/med | V2 req avg/med |
-|---:|---|---:|---:|---:|---:|---:|---:|---:|---:|
-| 4096 | case0 | 1.0/4096 | 0.0/0 | 100.0% | 4096 | 0.101/0.101/0.101 | 0.076/0.076/0.076 | 0.537/0.537 | 0.451/0.451 |
-| 4096 | cascade | 43.0/176128 | 43.0/94208 | 46.5% | 81920 | 0.091/0.087/0.073 | 0.086/0.082/0.066 | 0.521/0.510 | 0.520/0.512 |
-| 4096 | hot/cold | 145.0/593920 | 2.0/8192 | 98.6% | 585728 | 0.089/0.085/0.064 | 0.079/0.074/0.061 | 0.520/0.509 | 0.523/0.502 |
-| 4096 | branching | 283.0/871424 | 7.0/14336 | 98.4% | 858112 | 0.083/0.077/0.062 | 0.075/0.070/0.060 | 0.503/0.498 | 0.502/0.489 |
-| 8192 | case0 | 1.0/8192 | 0.0/0 | 100.0% | 8192 | 0.101/0.101/0.101 | 0.076/0.076/0.076 | 0.476/0.476 | 0.450/0.450 |
-| 8192 | cascade | 29.0/237568 | 29.0/237568 | 0.0% | 0 | 0.162/0.158/0.090 | 0.122/0.107/0.087 | 0.872/0.832 | 0.567/0.550 |
-| 8192 | hot/cold | 95.0/778240 | 13.0/106496 | 86.3% | 667648 | 0.107/0.098/0.064 | 0.089/0.079/0.061 | 0.575/0.548 | 0.578/0.508 |
-| 8192 | branching | 179.5/1091584 | 16.0/63616 | 94.2% | 1036160 | 0.094/0.088/0.063 | 0.078/0.073/0.060 | 0.522/0.519 | 0.513/0.494 |
-| 16384 | case0 | 1.0/16384 | 0.0/0 | 100.0% | 16384 | 0.128/0.128/0.128 | 0.077/0.077/0.077 | 0.505/0.505 | 0.456/0.456 |
-| 16384 | cascade | 22.0/360448 | 22.0/360448 | 0.0% | 0 | 0.205/0.179/0.145 | 0.249/0.232/0.146 | 0.895/0.917 | 1.264/1.074 |
-| 16384 | hot/cold | 71.0/1163264 | 20.0/307840 | 73.5% | 920960 | 0.152/0.139/0.074 | 0.100/0.081/0.061 | 0.756/0.756 | 0.578/0.511 |
-| 16384 | branching | 131.0/1585152 | 19.0/154240 | 90.3% | 1516928 | 0.119/0.114/0.063 | 0.079/0.074/0.061 | 0.590/0.550 | 0.501/0.499 |
+### 旧结果处理
 
-| doc | case | V1 prefill total | V2 prefill total | speedup | V1 queue avg/max | V2 queue avg/max |
-|---:|---|---:|---:|---:|---:|---:|
-| 4096 | case0 | 0.069s | 0.048s | 1.43x | 0.000/0.000s | 0.000/0.000s |
-| 4096 | cascade | 1.938s | 1.728s | 1.12x | 0.010/0.045s | 0.011/0.039s |
-| 4096 | hot/cold | 7.541s | 6.031s | 1.25x | 0.011/0.045s | 0.010/0.049s |
-| 4096 | branching | 13.884s | 11.510s | 1.21x | 0.010/0.049s | 0.009/0.043s |
-| 8192 | case0 | 0.074s | 0.049s | 1.52x | 0.000/0.000s | 0.000/0.000s |
-| 8192 | cascade | 2.203s | 1.782s | 1.24x | 0.022/0.089s | 0.015/0.072s |
-| 8192 | hot/cold | 6.579s | 4.679s | 1.41x | 0.012/0.065s | 0.012/0.056s |
-| 8192 | branching | 10.785s | 7.828s | 1.38x | 0.011/0.056s | 0.010/0.040s |
-| 16384 | case0 | 0.100s | 0.050s | 2.02x | 0.000/0.000s | 0.000/0.000s |
-| 16384 | cascade | 2.141s | 2.420s | 0.88x | 0.028/0.082s | 0.033/0.100s |
-| 16384 | hot/cold | 7.432s | 4.319s | 1.72x | 0.016/0.089s | 0.012/0.094s |
-| 16384 | branching | 10.865s | 6.109s | 1.78x | 0.014/0.087s | 0.010/0.043s |
+以下结果不再用于当前论文/简历项目主结论：
 
-观察：
+```text
+exp/prefix_cache_serving_20260901_154339/
+exp/prefix_cache_serving_20260901_181056/
+exp/v3_memory_sweep_20260901_160936/
+exp/cpu_kv_memory_doclen_sweep_20260901_095444/
+exp/cpu_kv_memory_doclen_sweep_20260901_095330/
+exp/cpu_kv_memory_doclen_sweep_20260901_095156/
+exp/doclen_sweep_*/
+exp/prefix_cache_v1_vs_recompute_*/
+exp/prefix_cache_serving_poisson_*/
+exp/v2_lru_*/
+exp/smoke_*/
+```
 
-- V2 不降低 CPU prefix cache 容量需求；CPU KV GB 基本等于 unique reusable prefix working set。V2 的收益来自把一部分 V1 的关键路径同步 H2D restore 变成 GPU inactive LRU hit。
-- document length 越长，单个 prefix 占用的 GPU KV 越大，LRU 能同时保留的完整历史 prefix 数量越少。当前 24GB GPU KV 下，4K/8K/16K 单 prompt 约为 `0.58/1.14/2.27GB`，估算可容纳完整 prompt 数从 `41 -> 21 -> 10` 下降，所以长 prefix 下 swapin token reduction 变小是预期现象。
-- `hot/cold` 和 `branching` 是 V2 的主目标场景。随着 prefix 拉长到 16K，V2 仍能把同步 swapin tokens 分别降低 `73.5%` 和 `90.3%`。
-- `cascade` 是边界 case：8K/16K 下 V2 LRU hit 为 0，说明纯顺序 tile/thrashing 访问没有 temporal locality，朴素 LRU 解决不了；这个 case 更适合保留为 sanity / stress，而不是证明 V2 收益。
-- queueing latency 整体较低，说明这轮不是旧版一次性批量提交造成的大排队。TTFT 的改善主要来自减少关键路径 restore；request latency 改善较小，因为短输出 decode 仍占相当比例。
-- 4K 的 working set 约等于 GPU KV，压力偏轻；8K/16K 的 working set/GPU 分别约 `1.34-1.36x` 和 `2.02-2.06x`，更适合作为后续主结果。
+原因：这些结果分别使用了旧统计口径、旧 V1/V2/V3 语义，或旧参数。尤其 `prefix_cache_serving_20260901_181056` 的 V3 配置中 lazy target window 大于实际 GPU KV blocks，不能用于评估 selective writeback。
+
+当前可复用结果只有：
+
+```text
+exp/prefix_cache_serving_20260901_181816/
+```
+
+### V3 Watermark / CPU Cap 初步扫描
+
+结果目录：
+
+```text
+exp/v3_hotcold_gpu_wm_sweep_20260901_214009/
+```
+
+本轮只跑 `hot_cold_sharing`，固定 `document_length=8192`、`gpu_kv_cache_gb=8.0`、`target_working_set_gb=20.0`、Poisson arrival、`max_num_seqs=8`。目的不是重跑完整主实验，而是给 V3 找 memory-latency tradeoff 的参数范围。
+
+第一步先让 CPU cap 失效，只看 GPU lazy writeback watermark。`watermark=1.0` 没跑，因为当前 `max_num_batched_tokens=33152`、`block_size=256` 时 target window 会超过实际 GPU block 数；因此这轮扫 `0 / 0.25 / 0.5 / 0.7`。
+
+| mode | GPU watermark | CPU peak | sync swapin blocks | doc recompute est | prefill total | schedule time | median TTFT | median req latency |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| V2 | - | 20.25 GB | 577 | 0 | 3.126s | 0.536s | 0.088s | 0.552s |
+| V3 | 0 | 20.25 GB | 513 | 0 | 3.715s | 0.575s | 0.088s | 0.544s |
+| V3 | 0.25 | 20.25 GB | 545 | 0 | 3.205s | 0.577s | 0.079s | 0.510s |
+| V3 | 0.5 | 20.25 GB | 577 | 0 | 2.968s | 0.577s | 0.080s | 0.502s |
+| V3 | 0.7 | 20.25 GB | 578 | 0 | 3.467s | 0.590s | 0.089s | 0.548s |
+
+结论：在 CPU 不限时，`watermark=0.25/0.5` 都没有触发 recompute，sync swapin 与 V2 接近；`0.5` 是这轮最稳的点。调度开销已经回到 V2 同级，说明 pinned CPU pool 和 allocation 后触发基本解决了早期 V3 的 scheduler 热路径开销问题。
+
+第二步固定 `watermark=0.5`，改用 stream warmup 扫描 CPU cache cap。stream warmup 只把请求流前 30% 作为稳态预热，不再强制所有 document 都先访问一次；这比 all-doc warmup 更接近 serving 场景，也避免把无限 CPU backing 的 V2 设成过强上界。
+
+结果目录：
+
+```text
+exp/v3_hotcold_cpu_cap_stream_20260901_225019/
+```
+
+参照 recompute baseline 使用当前可复用 hot/cold 结果：`prefill total = 6.307s`、`median TTFT = 0.081s`、`median request latency = 0.613s`。
+
+![V3 stream CPU cap speedup vs recompute baseline](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_speedup_vs_recompute.svg)
+
+![V3 stream CPU cap live memory](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_memory.svg)
+
+![V3 stream CPU cap recompute/swapin](exp/v3_hotcold_cpu_cap_stream_20260901_225019/figures/stream_cpu_cap_recompute_swapin.svg)
+
+| CPU cap | CPU peak | CPU evict blocks | CPU hit blocks | sync swapin blocks | doc recompute est | prefill total | prefill speedup vs recompute | median TTFT | median req latency |
+|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| 1 GB | 1.02 GB | 5,885 | 0 | 0 | 120,064 | 6.091s | 1.04x | 0.188s | 0.703s |
+| 3 GB | 3.02 GB | 4,158 | 0 | 0 | 110,848 | 5.226s | 1.21x | 0.102s | 0.630s |
+| 5 GB | 5.03 GB | 2,533 | 0 | 0 | 106,496 | 4.792s | 1.32x | 0.096s | 0.601s |
+| 8 GB | 8.02 GB | 913 | 0 | 0 | 106,496 | 4.580s | 1.38x | 0.085s | 0.572s |
+| 10 GB | 10.02 GB | 540 | 2 | 2 | 105,984 | 4.635s | 1.36x | 0.084s | 0.578s |
+| 12.5 GB | 12.52 GB | 381 | 0 | 0 | 106,496 | 4.623s | 1.36x | 0.090s | 0.584s |
+| 14 GB | 14.03 GB | 324 | 14 | 14 | 102,912 | 4.519s | 1.40x | 0.086s | 0.584s |
+| 15 GB | 15.01 GB | 248 | 62 | 62 | 90,624 | 4.280s | 1.47x | 0.087s | 0.555s |
+| 16 GB | 16.03 GB | 153 | 128 | 128 | 73,728 | 3.790s | 1.66x | 0.082s | 0.535s |
+| 17 GB | 17.02 GB | 125 | 128 | 128 | 73,728 | 3.838s | 1.64x | 0.086s | 0.545s |
+| 18 GB | 18.04 GB | 32 | 128 | 128 | 73,728 | 4.008s | 1.57x | 0.105s | 0.702s |
+| 19 GB | 19.02 GB | 4 | 128 | 128 | 73,728 | 3.763s | 1.68x | 0.084s | 0.533s |
+| 20 GB | 19.12 GB | 0 | 128 | 128 | 73,728 | 3.806s | 1.66x | 0.085s | 0.541s |
+
+结论：stream warmup 下，低 CPU cap 不再像 all-doc warmup 那样立刻崩掉，因为热点请求大量由 GPU LRU 命中覆盖；但 `1GB` 已经丢掉 request latency 收益。`5-12.5GB` 仍有 prefill 加速，不过几乎没有 CPU hit，主要收益来自 GPU LRU 而不是 CPU restore。`16GB` 左右开始达到和 `19/20GB` 接近的 CPU restore / recompute 水平，可作为下一轮细扫的中心点；`18GB` 的端到端 latency 有单次抖动，暂不单独下结论。
+
+当前 water marker 记录：GPU lazy writeback watermark 固定为 `0.5`；CPU watermark 这一轮等价为硬 cap 扫描，点位是 `1 / 3 / 5 / 8 / 10 / 12.5 / 14 / 15 / 16 / 17 / 18 / 19 / 20 GB`。后续如果要找最终推荐参数，可以围绕 `14-17GB` 做多次重复。
 
 ## 下一步
 
-1. 后续主实验改成 cache pressure sweep：固定 `document_length = 8192`、`gpu_kv_cache_gb`、`query_length`、`output_len`、`max_num_seqs` 和 arrival rate，只调整 `num_documents`，扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
-2. `document_length` 不作为主变量，只保留少量 8K/16K sensitivity 点，用来说明 prefix 越长时单次 miss/restore 成本更高。
-3. 继续保留 `case0_functional`、`cascade_tile`、`hot_cold_sharing`、`branching_prefix_sharing`，其中性能主张主要来自 hot/cold 和 branching；cascade 作为 LRU 无效边界 case。
-4. 下一轮如需补 recompute baseline，应在相同 Poisson arrival、`max_num_seqs=8`、`max_num_batched_tokens` 和 GPU KV 参数下重跑，避免和旧版拥塞口径混用。
-5. V3 聚焦 memory-aware selective/lazy writeback；重点扫描 `lazy_writeback_watermark_ratio` 与 `cpu_prefix_cache_gb_limit`，观察 CPU memory、sync swapin、recompute 和 TTFT 的权衡。
+1. 后续 benchmark 不再默认使用 all-doc warmup 做主结论；改用 serving-style stream：生成一条长请求流，前一段只负责形成 cache steady state，后一段计入指标。
+2. `bench_long_doc_qa.py` 默认已切到 `--warmup-mode stream --stream-warmup-ratio 0.3`；脚本也会显式写入这两个参数。`all_docs` 只保留给 sanity / 旧结果复现，不再作为主实验口径。
+3. V3 当前建议参数：`lazy_writeback_watermark_ratio = 0.5`；stream 口径下 CPU cap 可围绕 `14-17GB` 继续细扫，`16GB` 是目前比较稳的候选点。
+4. 后续主实验改成 cache pressure sweep：固定 `document_length = 8192`，通过改变 `num_documents` 扫描 `working_set_KV / GPU_KV`，例如 `0.5x / 1x / 2x / 3x / 4x`。
+5. `cascade_tile` 保留为 sanity / stress；性能主张主要来自 `hot_cold_sharing` 和 `branching_prefix_sharing`。
 6. V4 再做 scheduler-aware prefetch / OPT eviction，并补充 prefetch true/false positive、false negative 等准确性指标。

@@ -1,6 +1,7 @@
 import pickle
 from collections import OrderedDict
 from time import perf_counter
+import numpy as np
 import torch
 import torch.distributed as dist
 from multiprocessing.synchronize import Event
@@ -10,7 +11,7 @@ from nanovllm.config import Config
 from nanovllm.engine.sequence import Sequence
 from nanovllm.models.qwen3 import Qwen3ForCausalLM
 from nanovllm.layers.sampler import Sampler
-from nanovllm.utils.context import set_context, get_context, reset_context
+from nanovllm.utils.context import set_context, reset_context
 from nanovllm.utils.loader import load_model
 
 
@@ -60,6 +61,7 @@ class ModelRunner:
         self.copy_stream = torch.cuda.Stream()
         if not self.enforce_eager:
             self.capture_cudagraph()
+        self.allocate_decode_buffers()
         torch.set_default_device("cpu")
         torch.set_default_dtype(default_dtype)
 
@@ -305,10 +307,13 @@ class ModelRunner:
             bytes_written += nbytes
 
         latency = pending["start_event"].elapsed_time(pending["done_event"]) / 1000
+        latency_per_block = latency / len(pending["blocks"])
         self.prefix_transfer_metrics["cpu_prefix_writeback_count"] += len(pending["blocks"])
         self.prefix_transfer_metrics["cpu_prefix_d2h_bytes"] += bytes_written
+        # Copies are serialized on one stream, so batch elapsed approximates their
+        # summed copy time; the existing block-count denominator remains comparable.
         self.prefix_transfer_metrics["cpu_prefix_writeback_latency_sum"] += latency
-        self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"] = max(self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"], latency)
+        self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"] = max(self.prefix_transfer_metrics["cpu_prefix_writeback_latency_max"], latency_per_block)
         self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"] = max(
             self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"], self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
         )
@@ -330,7 +335,7 @@ class ModelRunner:
         for pending in self.pending_prefix_writebacks:
             if pending["done_event"].query():
                 evicted_hashes.extend(self._record_completed_prefix_writeback(pending))
-                completed_ids.append(pending["id"])
+                completed_ids.extend(pending["ids"])
             else:
                 still_pending.append(pending)
         self.pending_prefix_writebacks = still_pending
@@ -339,54 +344,56 @@ class ModelRunner:
     def writeback_prefix_blocks(self, entries):
         # D2H 写回统一走这里：V1/V2 传入的是 prefill 完整 prefix，V3 传入的是
         # inactive LRU victim 侧挑出的少量 blocks。真实 copy 是异步的，返回的 id 交给 Scheduler 跟踪。
-        # 每个 block 单独记录 event；已完成的 block 可以先进入 CPU-backed LRU，未完成的继续 protected。
+        # 同一次提交共享一对 timing/completion events。copy stream 保证 batch 内 copy 有序，
+        # done_event 完成时整批 blocks 都可安全进入 CPU-backed LRU。
         if not entries:
             return []
 
         submit_start = perf_counter()
-        event_start = perf_counter()
-        compute_done = torch.cuda.Event()
-        torch.cuda.current_stream().record_event(compute_done)
-        self.prefix_transfer_metrics["cpu_prefix_writeback_event_wall_sec"] += perf_counter() - event_start
-
+        accepted = []
         writeback_ids = []
         evicted_hashes = []
-        with torch.cuda.stream(self.copy_stream):
-            self.copy_stream.wait_event(compute_done)
-            for h, block_id in entries:
-                writeback_id = self.next_prefix_writeback_id
-                self.next_prefix_writeback_id += 1
+        for h, block_id in entries:
+            gpu_block = self.kv_cache[:, :, block_id]
+            # pinned CPU tensor 才能让 non_blocking D2H 真正异步排到 copy stream 上。
+            alloc_start = perf_counter()
+            cpu_block, pooled, evicted_hash = self._take_cpu_prefix_block(gpu_block.shape, gpu_block.dtype)
+            self.prefix_transfer_metrics["cpu_prefix_writeback_cpu_alloc_wall_sec"] += perf_counter() - alloc_start
+            if evicted_hash is not None:
+                evicted_hashes.append(evicted_hash)
+            if cpu_block is None:
+                break
+            writeback_id = self.next_prefix_writeback_id
+            self.next_prefix_writeback_id += 1
+            writeback_ids.append(writeback_id)
+            accepted.append((h, block_id, cpu_block, pooled))
 
-                event_start = perf_counter()
-                start_event = torch.cuda.Event(enable_timing=True)
-                done_event = torch.cuda.Event(enable_timing=True)
-                self.prefix_transfer_metrics["cpu_prefix_writeback_event_wall_sec"] += perf_counter() - event_start
+        if accepted:
+            event_start = perf_counter()
+            compute_done = torch.cuda.Event()
+            start_event = torch.cuda.Event(enable_timing=True)
+            done_event = torch.cuda.Event(enable_timing=True)
+            torch.cuda.current_stream().record_event(compute_done)
+            self.prefix_transfer_metrics["cpu_prefix_writeback_event_wall_sec"] += perf_counter() - event_start
 
-                gpu_block = self.kv_cache[:, :, block_id]
-                # pinned CPU tensor 才能让 non_blocking D2H 真正异步排到 copy stream 上。
-                alloc_start = perf_counter()
-                cpu_block, pooled, evicted_hash = self._take_cpu_prefix_block(gpu_block.shape, gpu_block.dtype)
-                self.prefix_transfer_metrics["cpu_prefix_writeback_cpu_alloc_wall_sec"] += perf_counter() - alloc_start
-                if evicted_hash is not None:
-                    evicted_hashes.append(evicted_hash)
-                if cpu_block is None:
-                    break
-
-                copy_start = perf_counter()
+            copy_start = perf_counter()
+            with torch.cuda.stream(self.copy_stream):
+                self.copy_stream.wait_event(compute_done)
                 start_event.record()
-                cpu_block.copy_(gpu_block, non_blocking=True)
+                for _h, block_id, cpu_block, _pooled in accepted:
+                    gpu_block = self.kv_cache[:, :, block_id]
+                    cpu_block.copy_(gpu_block, non_blocking=True)
                 done_event.record()
-                self.prefix_transfer_metrics["cpu_prefix_writeback_copy_enqueue_wall_sec"] += perf_counter() - copy_start
+            self.prefix_transfer_metrics["cpu_prefix_writeback_copy_enqueue_wall_sec"] += perf_counter() - copy_start
 
-                append_start = perf_counter()
-                self.pending_prefix_writebacks.append({
-                    "id": writeback_id,
-                    "blocks": [(h, cpu_block, pooled)],
-                    "start_event": start_event,
-                    "done_event": done_event,
-                })
-                writeback_ids.append(writeback_id)
-                self.prefix_transfer_metrics["cpu_prefix_writeback_pending_append_wall_sec"] += perf_counter() - append_start
+            append_start = perf_counter()
+            self.pending_prefix_writebacks.append({
+                "ids": writeback_ids,
+                "blocks": [(h, cpu_block, pooled) for h, _block_id, cpu_block, pooled in accepted],
+                "start_event": start_event,
+                "done_event": done_event,
+            })
+            self.prefix_transfer_metrics["cpu_prefix_writeback_pending_append_wall_sec"] += perf_counter() - append_start
 
         self.prefix_transfer_metrics["cpu_prefix_writeback_submit_wall_sec"] += perf_counter() - submit_start
         return {"writeback_ids": writeback_ids, "evicted_hashes": evicted_hashes}
@@ -482,26 +489,60 @@ class ModelRunner:
         set_context(True, cu_seqlens_q, cu_seqlens_k, max_seqlen_q, max_seqlen_k, slot_mapping, None, block_tables)
         return input_ids, positions
 
+    def allocate_decode_buffers(self):
+        max_bs = min(self.config.max_num_seqs, 512)
+        max_num_blocks = (self.config.max_model_len + self.block_size - 1) // self.block_size
+        shapes = {
+            "input_ids": ((max_bs,), torch.int64),
+            "positions": ((max_bs,), torch.int64),
+            "slot_mapping": ((max_bs,), torch.int32),
+            "context_lens": ((max_bs,), torch.int32),
+            "block_tables": ((max_bs, max_num_blocks), torch.int32),
+            "temperatures": ((max_bs,), torch.float32),
+        }
+        self.decode_host_buffers = {
+            name: torch.empty(shape, dtype=dtype, device="cpu", pin_memory=True)
+            for name, (shape, dtype) in shapes.items()
+        }
+        self.decode_host_arrays = {name: tensor.numpy() for name, tensor in self.decode_host_buffers.items()}
+        if self.enforce_eager:
+            self.decode_device_buffers = {
+                name: torch.empty(shape, dtype=dtype, device="cuda")
+                for name, (shape, dtype) in shapes.items()
+            }
+        else:
+            self.decode_device_buffers = dict(self.graph_vars)
+            self.decode_device_buffers["temperatures"] = torch.empty(max_bs, dtype=torch.float32, device="cuda")
+
     def prepare_decode(self, seqs: list[Sequence]):
-        input_ids = []
-        positions = []
-        slot_mapping = []
-        context_lens = []
-        for seq in seqs:    # 每次只生成一个 token
-            input_ids.append(seq.last_token)
-            positions.append(len(seq) - 1)
-            context_lens.append(len(seq))
-            slot_mapping.append(seq.block_table[-1] * self.block_size + seq.last_block_num_tokens  - 1)
-        input_ids = torch.tensor(input_ids, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        positions = torch.tensor(positions, dtype=torch.int64, pin_memory=True).cuda(non_blocking=True)
-        slot_mapping = torch.tensor(slot_mapping, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        context_lens = torch.tensor(context_lens, dtype=torch.int32, pin_memory=True).cuda(non_blocking=True)
-        block_tables = self.prepare_block_tables(seqs)
-        set_context(False, slot_mapping=slot_mapping, context_lens=context_lens, block_tables=block_tables)
+        bs = len(seqs)
+        padded_bs = bs if self.enforce_eager else next(x for x in self.graph_bs if x >= bs)
+        host = self.decode_host_buffers
+        arrays = self.decode_host_arrays
+        arrays["slot_mapping"][:padded_bs].fill(-1)
+        arrays["context_lens"][:padded_bs].fill(0)
+        arrays["block_tables"][:padded_bs].fill(-1)
+        for i, seq in enumerate(seqs):
+            arrays["input_ids"][i] = seq.last_token
+            arrays["positions"][i] = len(seq) - 1
+            arrays["context_lens"][i] = len(seq)
+            arrays["slot_mapping"][i] = seq.block_table[-1] * self.block_size + seq.last_block_num_tokens - 1
+            arrays["block_tables"][i, :len(seq.block_table)] = seq.block_table
+        for name in ("input_ids", "positions", "slot_mapping", "context_lens", "block_tables"):
+            self.decode_device_buffers[name][:padded_bs].copy_(host[name][:padded_bs], non_blocking=True)
+        input_ids = self.decode_device_buffers["input_ids"][:bs]
+        positions = self.decode_device_buffers["positions"][:bs]
+        set_context(False, slot_mapping=self.decode_device_buffers["slot_mapping"][:bs], context_lens=self.decode_device_buffers["context_lens"][:bs], block_tables=self.decode_device_buffers["block_tables"][:bs])
         return input_ids, positions
 
-    def prepare_sample(self, seqs: list[Sequence]):
+    def prepare_sample(self, seqs: list[Sequence], is_prefill: bool):
         temperatures = [seq.temperature for seq in seqs]
+        if not is_prefill:
+            bs = len(seqs)
+            self.decode_host_arrays["temperatures"][:bs] = temperatures
+            temperatures_device = self.decode_device_buffers["temperatures"][:bs]
+            temperatures_device.copy_(self.decode_host_buffers["temperatures"][:bs], non_blocking=True)
+            return temperatures_device
         temperatures = torch.tensor(temperatures, dtype=torch.float32, pin_memory=True).cuda(non_blocking=True)
         return temperatures
 
@@ -514,18 +555,9 @@ class ModelRunner:
             # Graph Replay = 不再逐层执行，而是重放一段 GPU 执行指令序列。相当于把多个kernel launch合成一次replay
             # 在capture_cudagraph初始化图
             bs = input_ids.size(0)
-            context = get_context()
             graph = self.graphs[next(x for x in self.graph_bs if x >= bs)]
-            graph_vars = self.graph_vars
-            graph_vars["input_ids"][:bs] = input_ids
-            graph_vars["positions"][:bs] = positions
-            graph_vars["slot_mapping"].fill_(-1)
-            graph_vars["slot_mapping"][:bs] = context.slot_mapping
-            graph_vars["context_lens"].zero_()
-            graph_vars["context_lens"][:bs] = context.context_lens
-            graph_vars["block_tables"][:bs, :context.block_tables.size(1)] = context.block_tables
             graph.replay()
-            return self.model.compute_logits(graph_vars["outputs"][:bs])
+            return self.model.compute_logits(self.graph_vars["outputs"][:bs])
 
     def run(self, seqs: list[Sequence], is_prefill: bool) -> list[int]:
         # LLM 的每次 forward 都是 batch。
@@ -538,7 +570,7 @@ class ModelRunner:
         input_ids, positions = self.prepare_prefill(seqs) if is_prefill else self.prepare_decode(seqs)
         prepare_wall = perf_counter() - t
         t = perf_counter()
-        temperatures = self.prepare_sample(seqs) if self.rank == 0 else None
+        temperatures = self.prepare_sample(seqs, is_prefill) if self.rank == 0 else None
         sample_prepare_wall = perf_counter() - t
         start_event = done_event = None
         if is_prefill:
