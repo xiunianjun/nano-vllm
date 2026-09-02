@@ -21,16 +21,18 @@ PREFILL_BATCH_MULT="${PREFILL_BATCH_MULT:-4}"
 REQUEST_RATE="${REQUEST_RATE:-2.0}"
 WARMUP_MODE="${WARMUP_MODE:-stream}"
 STREAM_WARMUP_RATIO="${STREAM_WARMUP_RATIO:-0.3}"
-RUN_CASE0="${RUN_CASE0:-1}"
-RUN_CASCADE="${RUN_CASCADE:-1}"
+RUN_CASE0="${RUN_CASE0:-0}"
+RUN_CASCADE="${RUN_CASCADE:-0}"
 RUN_HOT_COLD="${RUN_HOT_COLD:-1}"
-RUN_BRANCHING="${RUN_BRANCHING:-1}"
+RUN_HOT_COLD_BURST="${RUN_HOT_COLD_BURST:-1}"
+RUN_BRANCHING="${RUN_BRANCHING:-0}"
+ARRIVAL_BURST_SIZE="${ARRIVAL_BURST_SIZE:-1}"
 HOT_DOCUMENTS="${HOT_DOCUMENTS:-2}"
 HOT_REQUEST_RATIO="${HOT_REQUEST_RATIO:-0.7}"
 HOT_REPEAT_COUNT="${HOT_REPEAT_COUNT:-4}"
-MODES="${MODES:-baseline v1 v2 v3}"
-LAZY_WRITEBACK_WATERMARK_RATIO="${LAZY_WRITEBACK_WATERMARK_RATIO:-0.5}"
-CPU_PREFIX_CACHE_GB_LIMIT="${CPU_PREFIX_CACHE_GB_LIMIT:-0}"
+MODES="${MODES:-baseline v1 v2 v3 v4}"
+LAZY_WRITEBACK_TARGET_BLOCKS="${LAZY_WRITEBACK_TARGET_BLOCKS:-40}"
+CPU_PREFIX_CACHE_GB_LIMIT="${CPU_PREFIX_CACHE_GB_LIMIT:-15}"
 ROOT_LEN="${ROOT_LEN:-$((DOC_LEN / 2))}"
 BRANCH_LEN="${BRANCH_LEN:-$((DOC_LEN - ROOT_LEN))}"
 PROMPT_LEN="$((DOC_LEN + QUERY_LEN))"
@@ -81,7 +83,16 @@ run_once() {
       --enable-cpu-kv-offload
       --enable-gpu-lru-retention
       --enable-lazy-cpu-kv-writeback
-      --lazy-writeback-watermark-ratio "$LAZY_WRITEBACK_WATERMARK_RATIO"
+      --lazy-writeback-target-blocks "$LAZY_WRITEBACK_TARGET_BLOCKS"
+      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+    )
+  elif [[ "$mode" == "v4" ]]; then
+    offload_args=(
+      --enable-cpu-kv-offload
+      --enable-gpu-lru-retention
+      --enable-lazy-cpu-kv-writeback
+      --enable-scheduler-aware-prefetch
+      --lazy-writeback-target-blocks "$LAZY_WRITEBACK_TARGET_BLOCKS"
       --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
     )
   fi
@@ -168,6 +179,21 @@ keys = [
     "lazy_writeback_target_block_count",
     "lazy_writeback_scheduled_block_count",
     "lazy_writeback_completed_block_count",
+    "scheduler_visible_request_count_max",
+    "scheduler_prefetch_planned_request_count",
+    "scheduler_prefetch_planned_block_count",
+    "scheduler_prefetch_completed_block_count",
+    "scheduler_prefetch_useful_block_count",
+    "scheduler_prefetch_wasted_block_count",
+    "scheduler_prefetch_targeted_eviction_count",
+    "scheduler_prefetch_targeted_writeback_count",
+    "scheduler_prefetch_wait_count",
+    "scheduler_prefetch_wait_wall_sec",
+    "scheduler_victim_no_visible_next_use_count",
+    "scheduler_victim_future_next_use_count",
+    "scheduler_prefetch_h2d_bytes",
+    "scheduler_prefetch_d2h_bytes",
+    "scheduler_prefetch_latency_sum",
     "document_recomputed_tokens_est",
     "cpu_prefix_d2h_bytes",
     "cpu_prefix_h2d_bytes",
@@ -231,7 +257,7 @@ def stats(values):
 
 
 mode_rows = {}
-for mode in ("baseline", "v1", "v2", "v3"):
+for mode in ("baseline", "v1", "v2", "v3", "v4"):
     rows = {}
     for path in sorted(case_dir.glob(f"{mode}_run*.json")):
         match = re.search(r"_run(\d+)\.json$", path.name)
@@ -291,6 +317,7 @@ add_speedups(summary["comparison"], "v2", "baseline", "v2_over_baseline")
 add_speedups(summary["comparison"], "v2", "v1", "v2_over_v1")
 add_speedups(summary["comparison"], "v3", "v2", "v3_over_v2")
 add_speedups(summary["comparison"], "v3", "v1", "v3_over_v1")
+add_speedups(summary["comparison"], "v4", "v3", "v4_over_v3")
 
 trace_mismatches = []
 output_mismatches = []
@@ -375,6 +402,16 @@ fi
 
 if [[ "$RUN_HOT_COLD" == "1" ]]; then
   run_case hot_cold_sharing "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
+    --workload long_doc_qa \
+    --repeat-mode hot_cold \
+    --repeat-count "$HOT_REPEAT_COUNT" \
+    --hot-documents "$HOT_DOCUMENTS" \
+    --hot-request-ratio "$HOT_REQUEST_RATIO"
+fi
+
+if [[ "$RUN_HOT_COLD_BURST" == "1" ]]; then
+  run_case hot_cold_burst "$MAX_NUM_SEQS" "$MAX_NUM_BATCHED_TOKENS" poisson "$REQUEST_RATE" \
+    --arrival-burst-size "$ARRIVAL_BURST_SIZE" \
     --workload long_doc_qa \
     --repeat-mode hot_cold \
     --repeat-count "$HOT_REPEAT_COUNT" \

@@ -55,6 +55,13 @@ class LLMEngine:
             )
             self.scheduler.restore_prefix_blocks = lambda entries: self.model_runner.call("restore_prefix_blocks", entries)
             self.scheduler.poll_prefix_writebacks = lambda wait=False: self.model_runner.call("poll_prefix_writebacks", wait)
+            if config.kv_cache_policy.scheduler_aware:
+                # V4 沿用相同的职责边界：Scheduler 传 reservation/查询 id，ModelRunner
+                # 才接触真实 KV tensor、copy_stream 和 final_event。V3 不注入这两个回调。
+                self.scheduler.replace_prefix_blocks = lambda entries: self.model_runner.call("replace_prefix_blocks", entries)
+                self.scheduler.poll_prefix_replacements = lambda wait=False: self.model_runner.call(
+                    "poll_prefix_replacements", wait
+                )
         self.request_start_times = {}
         self.request_latencies = []
         self.queueing_latencies = []

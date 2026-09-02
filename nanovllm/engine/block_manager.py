@@ -10,9 +10,12 @@ class Block:
         self.ref_count = 0
         self.hash = -1
         self.token_ids = []
-        # Keep transfer state on the block instead of duplicating it in a
-        # BlockManager set.
+        # writeback_pending：V3 正在把该 GPU block 备份到 CPU，完成前不能覆盖。
+        # replacement_pending：V4 已把该物理 slot 预留给另一个 prefix，完成前不属于 free/LRU。
+        # prefetched：V4 已预取但尚未被 request 命中，用于区分 useful/wasted prefetch。
         self.writeback_pending = False
+        self.replacement_pending = False
+        self.prefetched = False
 
     def update(self, hash: int, token_ids: list[int]):
         self.hash = hash
@@ -23,11 +26,15 @@ class Block:
         self.hash = -1
         self.token_ids = []
         self.writeback_pending = False
+        self.replacement_pending = False
+        self.prefetched = False
 
     def invalidate(self):
         self.hash = -1
         self.token_ids = []
         self.writeback_pending = False
+        self.replacement_pending = False
+        self.prefetched = False
 
 
 class BlockManager:
@@ -52,6 +59,14 @@ class BlockManager:
         # O(1) decode admission: the old path scanned the full inactive LRU
         # for every generated token.
         self.evictable_inactive_block_count = 0
+        # V4 只在主动 prefetch/replacement 规划期间临时设置这个顺序。
+        # demand allocation 和 V3 lazy writeback 仍使用 inactive_block_ids 的原始 LRU，
+        # 避免为了严格遵守 OPT 而在当前请求的关键路径上等待 D2H。
+        self.victim_order: list[int] = []
+        # hash -> 在可见 FCFS window 中最早会被哪个 request 使用；位置越大，next-use 越远。
+        self.visible_next_use: dict[int, int] = {}
+        # target hash -> 已预留的 GPU slot。pending 目标不能算 GPU hit，但规划时要避免重复预取。
+        self.pending_prefetch_hashes: dict[int, int] = {}
         self.reset_metrics()
 
     def reset_metrics(self):
@@ -63,6 +78,8 @@ class BlockManager:
             "gpu_lru_evicted_gpu_only_block_count": 0,
             "gpu_lru_cached_block_peak": len(self.inactive_block_ids),
             "lazy_writeback_scheduled_block_count": 0,
+            "scheduler_prefetch_useful_block_count": 0,
+            "scheduler_prefetch_wasted_block_count": 0,
         }
 
     def gpu_residency_for_cpu_eviction(self, protected_window_blocks: int):
@@ -75,7 +92,7 @@ class BlockManager:
         """
         gpu_resident_hashes = set(self.hash_to_block_id)
         protected_hashes = set()
-        for i, block_id in enumerate(self.inactive_block_ids):
+        for i, block_id in enumerate(self.ordered_inactive_block_ids()):
             if i >= protected_window_blocks:
                 break
             block = self.blocks[block_id]
@@ -115,6 +132,49 @@ class BlockManager:
 
     def free_block_count(self) -> int:
         return len(self.free_block_ids)
+
+    def ordered_inactive_block_ids(self):
+        """返回当前 victim 顺序；V4 规划之外自然回退到 LRU。"""
+        ordered = [block_id for block_id in self.victim_order if block_id in self.inactive_block_ids]
+        seen = set(ordered)
+        ordered.extend(block_id for block_id in self.inactive_block_ids if block_id not in seen)
+        return ordered
+
+    def update_victim_order(self, visible_seqs):
+        """按可见 FCFS next-use 重排 inactive blocks，相同 next-use 再按 LRU。"""
+        next_use = {}
+        for position, seq in enumerate(visible_seqs):
+            # prefix cache 只能连续命中。中间一块在 GPU/CPU/pending 中都不存在时，
+            # 后面的 hash 即使碰巧存在也不能直接复用，因此不应算作可见 next-use。
+            for block_idx in range(max(seq.num_blocks - 1, 0)):
+                tokens = seq.block_token_ids(block_idx)
+                h = seq.block_hash(block_idx)
+                block_id = self.hash_to_block_id.get(h)
+                available = (
+                    block_id is not None and self.blocks[block_id].token_ids == tokens
+                ) or self.has_cpu_block(h, tokens) or h in self.pending_prefetch_hashes
+                if not available:
+                    break
+                next_use[h] = min(position, next_use.get(h, position))
+        self.visible_next_use = next_use
+        lru_position = {block_id: i for i, block_id in enumerate(self.inactive_block_ids)}
+        # Python tuple 升序恰好表达目标优先级：
+        #   1. hash 不在 next_use 中（False）最先淘汰；
+        #   2. 在 window 中会使用时，position 越大越先淘汰；
+        #   3. 前两项相同，原 LRU 中越老越先淘汰。
+        self.victim_order = sorted(
+            self.inactive_block_ids,
+            key=lambda block_id: (
+                self.blocks[block_id].hash in next_use,
+                -next_use.get(self.blocks[block_id].hash, 0),
+                lru_position[block_id],
+            ),
+        )
+
+    def clear_victim_order(self):
+        """结束 V4 规划阶段，让 demand allocation 和 V3 安全窗口恢复 LRU。"""
+        self.victim_order = []
+        self.visible_next_use = {}
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -179,6 +239,9 @@ class BlockManager:
         if not block.writeback_pending:
             self.evictable_inactive_block_count -= 1
         block.ref_count = 1
+        if block.prefetched:
+            self.metrics["scheduler_prefetch_useful_block_count"] += 1
+            block.prefetched = False
         self.metrics["gpu_lru_hit_block_count"] += 1
         self.metrics["gpu_lru_hit_token_count"] += self.block_size
 
@@ -193,24 +256,26 @@ class BlockManager:
         # V3 只关心 LRU victim 前沿，而不是整个 inactive 队列。
         # 如果热 block 被复用过，它会回到 MRU 端；即使 CPU-backed，也不该拿来填 victim window。
         count = 0
-        for i, block_id in enumerate(self.inactive_block_ids):
+        for i, block_id in enumerate(self.ordered_inactive_block_ids()):
             if i >= target_safe_blocks:
                 break
             if self._is_safe_or_pending_victim(block_id):
                 count += 1
         return count
 
-    def select_lazy_writeback_entries(self, target_safe_blocks: int, pending_hashes: set[int]):
+    def select_lazy_writeback_entries(self, target_safe_blocks: int, pending_hashes: set[int], limit: int | None = None):
         # V3 lazy writeback 只“备份可能马上被淘汰的 inactive blocks”，不碰 active request。
         # target_safe_blocks 对应 LRU victim 前沿窗口：窗口内 safe/pending 不够，才补写回。
         # 这样刚被复用、位于 MRU 端的 CPU-backed block 不会让前沿窗口产生虚假的安全感。
         deficit = target_safe_blocks - self.victim_window_safe_or_pending_count(target_safe_blocks)
+        if limit is not None:
+            deficit = min(deficit, limit)
         if deficit <= 0:
             return []
         entries = []
         # OrderedDict 左侧是 LRU victim 侧。只从 victim window 内挑 GPU-only blocks 写回；
         # 窗口之外的热端 block 即使没有 CPU backing，也暂时不碰。
-        for i, block_id in enumerate(self.inactive_block_ids):
+        for i, block_id in enumerate(self.ordered_inactive_block_ids()):
             if i >= target_safe_blocks or len(entries) >= deficit:
                 break
             if self.blocks[block_id].writeback_pending:
@@ -239,7 +304,7 @@ class BlockManager:
         # 真正的 GPU 驱逐发生在 allocation 路径：free list 为空时才调用这里。
         # 不再“全局优先 CPU-backed”，而是严格沿 LRU victim 前沿往后找。
         # 这样刚被复用过、回到 MRU 端的 CPU-backed block 不会被跨顺序提前淘汰。
-        for block_id in self.inactive_block_ids:
+        for block_id in self.ordered_inactive_block_ids():
             # exclude 是本次 allocate 已经命中的 GPU prefix，pending 是 copy stream 正在读取的 block；
             # 两者都不能在同一次 allocation 里被选成 victim。
             if block_id in exclude_block_ids or self.blocks[block_id].writeback_pending:
@@ -248,6 +313,8 @@ class BlockManager:
             break
         assert victim is not None
         was_cpu_backed = self._is_cpu_backed(victim)
+        if self.blocks[victim].prefetched:
+            self.metrics["scheduler_prefetch_wasted_block_count"] += 1
         self.inactive_block_ids.pop(victim)
         self.evictable_inactive_block_count -= 1
         # victim 被覆盖前必须删掉 GPU hash mapping，否则后续会误判成 GPU hit。
@@ -259,6 +326,76 @@ class BlockManager:
         else:
             self.metrics["gpu_lru_evicted_gpu_only_block_count"] += 1
         return victim
+
+    def has_pending_prefetch(self, seq: Sequence) -> bool:
+        # 只检查可缓存的完整 prefix blocks；最后一个可能未填满的 block 不参与 prefix cache。
+        return any(
+            seq.block_hash(i) in self.pending_prefetch_hashes
+            for i in range(max(seq.num_blocks - 1, 0))
+        )
+
+    def plan_prefetch_reservations(self, targets, protected_block_ids: set[int]):
+        """给 CPU prefix 配 GPU slot：先用 free slot，不够时再按 V4 顺序选择 victim。"""
+        # reservation tuple：
+        # (target_hash, target_tokens, slot_id, victim_hash, victim_tokens, needs_writeback)
+        # protected 是 visible requests 已经会复用的 GPU prefix，不能为了预取把它们反向淘汰。
+        free_ids = list(self.free_block_ids)
+        victims = [
+            block_id for block_id in self.ordered_inactive_block_ids()
+            if block_id not in protected_block_ids and not self.blocks[block_id].writeback_pending
+        ]
+        reservations = []
+        for h, token_ids in targets:
+            # 一个 target 只占一个 slot；因此 targeted eviction 的数量严格等于
+            # target 数量减去可用 free slot 数量，不会额外扩大淘汰力度。
+            if free_ids:
+                block_id = free_ids.pop(0)
+                reservations.append((h, token_ids, block_id, None, None, False))
+            elif victims:
+                block_id = victims.pop(0)
+                victim = self.blocks[block_id]
+                reservations.append((
+                    h, token_ids, block_id, victim.hash, victim.token_ids,
+                    not self._is_cpu_backed(block_id),
+                ))
+            else:
+                break
+        return reservations
+
+    def commit_prefetch_reservations(self, reservations):
+        """提交已被 ModelRunner 接受的 reservation，并隐藏对应 slot 直到 CUDA 完成。"""
+        for h, _tokens, block_id, victim_hash, _victim_tokens, needs_writeback in reservations:
+            block = self.blocks[block_id]
+            if block_id in self.inactive_block_ids:
+                self.inactive_block_ids.pop(block_id)
+                self.evictable_inactive_block_count -= 1
+            else:
+                self.free_block_ids.remove(block_id)
+            if victim_hash is not None:
+                self.metrics["gpu_lru_eviction_count"] += 1
+                metric = (
+                    "gpu_lru_evicted_gpu_only_block_count" if needs_writeback
+                    else "gpu_lru_evicted_cpu_backed_block_count"
+                )
+                self.metrics[metric] += 1
+                if block.prefetched:
+                    self.metrics["scheduler_prefetch_wasted_block_count"] += 1
+            self._remove_hash_mapping(block_id)
+            block.invalidate()
+            # 此时旧 victim 已不能再作为 GPU hit，新 target 也尚未完成 H2D；
+            # slot 暂时只存在于 pending_prefetch_hashes，allocator 看不到它。
+            block.replacement_pending = True
+            self.pending_prefetch_hashes[h] = block_id
+
+    def complete_prefetch_reservation(self, h: int, token_ids: list[int], block_id: int):
+        # final_event 完成后才一次性公开新 hash，避免 request 读到尚未拷完的 KV。
+        block = self.blocks[block_id]
+        block.update(h, token_ids)
+        block.replacement_pending = False
+        block.prefetched = True
+        self.hash_to_block_id[h] = block_id
+        self.pending_prefetch_hashes.pop(h, None)
+        self._deactivate_block(block_id)
 
     # 返回 request 的 block 布局：[GPU, CPU, miss]
     def get_allocate_plan(self, seq: Sequence, enable_cpu_cache: bool = False):
@@ -360,6 +497,9 @@ class BlockManager:
                 if global_block_id in self.inactive_block_ids:
                     self.evictable_inactive_block_count += 1
             self.cpu_hash_to_token_ids[h] = block_token_ids
+
+    def register_cpu_metadata(self, h: int, block_token_ids: list[int]):
+        self.cpu_hash_to_token_ids[h] = block_token_ids
 
     def unregister_cpu_blocks(self, hashes):
         # CPU cache 容量限制可能会淘汰 backing tensor；Scheduler 收到后删掉 metadata，

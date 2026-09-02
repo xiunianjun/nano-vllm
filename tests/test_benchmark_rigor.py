@@ -239,6 +239,108 @@ class KVCachePolicyTests(unittest.TestCase):
         self.assertIs(KVCachePolicy.from_flags(True, False, True), KVCachePolicy.CPU_EAGER)
         self.assertIs(KVCachePolicy.from_flags(True, True, False), KVCachePolicy.CPU_EAGER_GPU_LRU)
         self.assertIs(KVCachePolicy.from_flags(True, True, True), KVCachePolicy.CPU_LAZY_GPU_LRU)
+        self.assertIs(
+            KVCachePolicy.from_flags(True, True, True, True),
+            KVCachePolicy.CPU_LAZY_GPU_LOOKAHEAD,
+        )
+
+
+class SchedulerAwarePrefetchTests(unittest.TestCase):
+    def setUp(self):
+        self.old_block_size = Sequence.block_size
+        Sequence.block_size = 4
+
+    def tearDown(self):
+        Sequence.block_size = self.old_block_size
+
+    def test_visible_next_use_changes_victim_order_and_pending_slot_state(self):
+        manager = BlockManager(2, 4)
+        visible = Sequence([1, 2, 3, 4, 9])
+        visible_hash = visible.block_hash(0)
+        cold_hash = Sequence.compute_hash([5, 6, 7, 8])
+        for block_id, h, tokens in (
+            (0, visible_hash, [1, 2, 3, 4]),
+            (1, cold_hash, [5, 6, 7, 8]),
+        ):
+            manager.free_block_ids.remove(block_id)
+            manager.blocks[block_id].update(h, tokens)
+            manager.hash_to_block_id[h] = block_id
+            manager.inactive_block_ids[block_id] = None
+            manager.evictable_inactive_block_count += 1
+
+        manager.update_victim_order([visible])
+        self.assertEqual(manager.victim_order, [1, 0])
+
+        target = Sequence([10, 11, 12, 13, 9])
+        target_hash = target.block_hash(0)
+        reservations = manager.plan_prefetch_reservations(
+            [(target_hash, target.block_token_ids(0))], set()
+        )
+        self.assertEqual(reservations[0][2:4], (1, cold_hash))
+        manager.commit_prefetch_reservations(reservations)
+        self.assertEqual(manager.pending_prefetch_hashes, {target_hash: 1})
+        self.assertNotIn(target_hash, manager.hash_to_block_id)
+        self.assertEqual(manager.metrics["gpu_lru_eviction_count"], 1)
+        self.assertEqual(manager.metrics["gpu_lru_evicted_gpu_only_block_count"], 1)
+
+        manager.complete_prefetch_reservation(target_hash, target.block_token_ids(0), 1)
+        self.assertEqual(manager.hash_to_block_id[target_hash], 1)
+        manager._activate_inactive_block(1)
+        self.assertEqual(manager.metrics["scheduler_prefetch_useful_block_count"], 1)
+
+    def test_opt_victim_order_is_scoped_to_replacement_planning(self):
+        manager = BlockManager(2, 4)
+        visible = Sequence([1, 2, 3, 4, 9])
+        visible_hash = visible.block_hash(0)
+        cold_hash = Sequence.compute_hash([5, 6, 7, 8])
+        for block_id, h, tokens in (
+            (0, visible_hash, [1, 2, 3, 4]),
+            (1, cold_hash, [5, 6, 7, 8]),
+        ):
+            manager.free_block_ids.remove(block_id)
+            manager.blocks[block_id].update(h, tokens)
+            manager.hash_to_block_id[h] = block_id
+            manager.inactive_block_ids[block_id] = None
+            manager.evictable_inactive_block_count += 1
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_scheduler_aware_prefetch = True
+        scheduler.waiting = deque([visible])
+        scheduler.max_num_seqs = 1
+        scheduler.metrics = defaultdict(int)
+        scheduler.block_manager = manager
+
+        # OPT 规划会保留马上使用的 block 0，选 block 1 做 replacement victim。
+        def inspect_opt_order():
+            self.assertEqual(manager.ordered_inactive_block_ids(), [1, 0])
+            return 0, 0
+
+        scheduler._start_v4_prefetch = inspect_opt_order
+        scheduler._plan_v4_prefetch()
+
+        # 规划阶段结束后恢复原 LRU。普通 demand allocation 依然先驱逐 block 0，
+        # 不会为了严格执行 OPT 而在关键路径上等待 GPU-only victim 写回。
+        self.assertEqual(manager.ordered_inactive_block_ids(), [0, 1])
+        self.assertEqual(manager._allocate_block(), 0)
+
+    def test_prefetch_admits_only_requests_whose_full_allocation_fits(self):
+        manager = BlockManager(2, 4)
+        first = Sequence([1, 2, 3, 4, 9])
+        second = Sequence([5, 6, 7, 8, 9])
+        manager.register_cpu_metadata(first.block_hash(0), first.block_token_ids(0))
+        manager.register_cpu_metadata(second.block_hash(0), second.block_token_ids(0))
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([first, second])
+        scheduler.max_num_seqs = 8
+        scheduler.scheduler_prefetch_max_blocks = 0
+        scheduler.block_manager = manager
+
+        planned_requests, targets, protected = scheduler._make_v4_prefetch_plan()
+
+        self.assertEqual(planned_requests, 1)
+        self.assertEqual(targets, [(first.block_hash(0), first.block_token_ids(0))])
+        self.assertEqual(protected, set())
 
 
 class _BlockManagerStub:

@@ -54,6 +54,11 @@ def parse_args():
     parser.add_argument("--enable-cpu-kv-offload", action=argparse.BooleanOptionalAction, default=False)
     parser.add_argument("--enable-gpu-lru-retention", action=argparse.BooleanOptionalAction, default=True)
     parser.add_argument("--enable-lazy-cpu-kv-writeback", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument("--enable-scheduler-aware-prefetch", action=argparse.BooleanOptionalAction, default=False)
+    parser.add_argument(
+        "--scheduler-prefetch-max-blocks", type=int, default=0,
+        help="V4 per-tick prefetch/background-D2H block budget. 0 leaves transfers capacity-bound.",
+    )
     parser.add_argument(
         "--enable-gpu-aware-cpu-eviction",
         action=argparse.BooleanOptionalAction,
@@ -411,6 +416,7 @@ def main():
         args.enable_cpu_kv_offload,
         args.enable_gpu_lru_retention,
         args.enable_lazy_cpu_kv_writeback,
+        args.enable_scheduler_aware_prefetch,
     )
     if args.warmup_mode == "stream" and not 0 <= args.stream_warmup_ratio < 1:
         raise ValueError("--stream-warmup-ratio must be in [0, 1)")
@@ -420,6 +426,12 @@ def main():
         raise ValueError("--arrival-burst-size must be positive")
     if args.arrival_mode != "poisson" and args.arrival_burst_size != 1:
         raise ValueError("--arrival-burst-size is only supported when --arrival-mode=poisson")
+    if args.scheduler_prefetch_max_blocks < 0:
+        raise ValueError("--scheduler-prefetch-max-blocks must be non-negative")
+    if args.enable_scheduler_aware_prefetch and not (
+        args.enable_cpu_kv_offload and args.enable_gpu_lru_retention and args.enable_lazy_cpu_kv_writeback
+    ):
+        raise ValueError("V4 prefetch requires CPU offload, GPU LRU retention, and lazy writeback")
     hf_config = AutoConfig.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     ids = choose_token_ids(tokenizer)
@@ -516,6 +528,8 @@ def main():
         enable_cpu_kv_offload=args.enable_cpu_kv_offload,
         enable_gpu_lru_retention=args.enable_gpu_lru_retention,
         enable_lazy_cpu_kv_writeback=args.enable_lazy_cpu_kv_writeback,
+        enable_scheduler_aware_prefetch=args.enable_scheduler_aware_prefetch,
+        scheduler_prefetch_max_blocks=args.scheduler_prefetch_max_blocks,
         enable_gpu_aware_cpu_eviction=args.enable_gpu_aware_cpu_eviction,
         lazy_writeback_watermark_ratio=args.lazy_writeback_watermark_ratio,
         lazy_writeback_target_blocks=args.lazy_writeback_target_blocks,
@@ -609,6 +623,8 @@ def main():
         "enable_cpu_kv_offload": args.enable_cpu_kv_offload,
         "enable_gpu_lru_retention": args.enable_gpu_lru_retention,
         "enable_lazy_cpu_kv_writeback": args.enable_lazy_cpu_kv_writeback,
+        "enable_scheduler_aware_prefetch": args.enable_scheduler_aware_prefetch,
+        "scheduler_prefetch_max_blocks": args.scheduler_prefetch_max_blocks,
         "enable_gpu_aware_cpu_eviction": args.enable_gpu_aware_cpu_eviction,
         "lazy_writeback_watermark_ratio": args.lazy_writeback_watermark_ratio,
         "lazy_writeback_target_blocks_requested": args.lazy_writeback_target_blocks,

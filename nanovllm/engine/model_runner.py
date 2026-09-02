@@ -44,6 +44,10 @@ class ModelRunner:
         # 异步 writeback 的完成状态由 CUDA event 标记，Scheduler 轮询完成后再释放 protected GPU block。
         self.pending_prefix_writebacks = []
         self.next_prefix_writeback_id = 0
+        # V4 replacement 复用同一个 copy_stream，但单独保存 final_event：一次 operation
+        # 可以包含多个 victim D2H 和 target H2D，Scheduler 只需按批次收割完成状态。
+        self.pending_prefix_replacements = []
+        self.next_prefix_replacement_id = 0
         self.reset_prefix_transfer_metrics()
 
         dist.init_process_group("nccl", "tcp://localhost:2333", world_size=self.world_size, rank=rank)
@@ -177,23 +181,27 @@ class ModelRunner:
         self.cpu_prefix_pool_reserved_block_count = len(self.cpu_prefix_pool_free_blocks)
         self.cpu_prefix_pool_reserved_bytes = self.cpu_prefix_pool_reserved_block_count * self.cpu_prefix_block_nbytes
 
-    def _evict_one_cpu_prefix_cache_entry(self, preferred_hashes=None, protected_hashes=None):
+    def _evict_one_cpu_prefix_cache_entry(self, preferred_hashes=None, protected_hashes=None, excluded_hashes=None):
         if not self.cpu_prefix_cache:
             return None
+        excluded_hashes = excluded_hashes or set()
         h = None
         preferred = False
         if preferred_hashes:
             # Preserve CPU LRU ordering inside the preferred class.  This is a
             # bounded scan (hundreds of blocks in the current setup), performed
             # only when the pinned pool is full and a writeback needs a block.
-            h = next((candidate for candidate in self.cpu_prefix_cache if candidate in preferred_hashes), None)
+            h = next((candidate for candidate in self.cpu_prefix_cache if candidate in preferred_hashes and candidate not in excluded_hashes), None)
             preferred = h is not None
         if h is None and protected_hashes:
             # CPU-only blocks still carry unique cache capacity, but sacrificing an
             # old one is safer than removing backing from the imminent GPU victims.
-            h = next((candidate for candidate in self.cpu_prefix_cache if candidate not in protected_hashes), None)
+            h = next((candidate for candidate in self.cpu_prefix_cache if candidate not in protected_hashes and candidate not in excluded_hashes), None)
         if h is None:
-            h, entry = self.cpu_prefix_cache.popitem(last=False)
+            h = next((candidate for candidate in self.cpu_prefix_cache if candidate not in excluded_hashes), None)
+            if h is None:
+                return None
+            entry = self.cpu_prefix_cache.pop(h)
         else:
             entry = self.cpu_prefix_cache.pop(h)
         if preferred:
@@ -205,7 +213,7 @@ class ModelRunner:
         self._release_cpu_prefix_block(entry)
         return h
 
-    def _take_cpu_prefix_block(self, shape, dtype, preferred_hashes=None, protected_hashes=None):
+    def _take_cpu_prefix_block(self, shape, dtype, preferred_hashes=None, protected_hashes=None, excluded_hashes=None):
         if self.cpu_prefix_pool_free_blocks:
             self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
             return self.cpu_prefix_pool_free_blocks.pop(), True, None
@@ -214,7 +222,9 @@ class ModelRunner:
             # A configured pool is a physical-memory hard cap. Reuse one LRU live
             # block; if all pool blocks are pending, reject the writeback rather
             # than silently allocating outside the advertised budget.
-            evicted_hash = self._evict_one_cpu_prefix_cache_entry(preferred_hashes, protected_hashes)
+            evicted_hash = self._evict_one_cpu_prefix_cache_entry(
+                preferred_hashes, protected_hashes, excluded_hashes
+            )
             if self.cpu_prefix_pool_free_blocks:
                 self.prefix_transfer_metrics["cpu_prefix_pool_reuse_count"] += 1
                 return self.cpu_prefix_pool_free_blocks.pop(), True, evicted_hash
@@ -253,6 +263,12 @@ class ModelRunner:
             "cpu_prefix_restore_latency_sum": 0.0,
             "cpu_prefix_writeback_latency_max": 0.0,
             "cpu_prefix_restore_latency_max": 0.0,
+            "scheduler_prefetch_h2d_count": 0,
+            "scheduler_prefetch_h2d_bytes": 0,
+            "scheduler_prefetch_d2h_count": 0,
+            "scheduler_prefetch_d2h_bytes": 0,
+            "scheduler_prefetch_latency_sum": 0.0,
+            "scheduler_prefetch_latency_max": 0.0,
             "cpu_prefix_writeback_submit_wall_sec": 0.0,
             "cpu_prefix_writeback_event_wall_sec": 0.0,
             "cpu_prefix_writeback_cpu_alloc_wall_sec": 0.0,
@@ -288,6 +304,8 @@ class ModelRunner:
         # CUDA event 记录的是整批 block copy 的时间，这里按批次求平均。
         metrics["cpu_prefix_writeback_latency_avg"] = metrics["cpu_prefix_writeback_latency_sum"] / writeback_count if writeback_count else 0.0
         metrics["cpu_prefix_restore_latency_avg"] = metrics["cpu_prefix_restore_latency_sum"] / restore_count if restore_count else 0.0
+        prefetch_count = metrics["scheduler_prefetch_h2d_count"]
+        metrics["scheduler_prefetch_latency_avg"] = metrics["scheduler_prefetch_latency_sum"] / prefetch_count if prefetch_count else 0.0
         return metrics
 
     def _enforce_cpu_prefix_cache_limit(self, preferred_hashes=None, protected_hashes=None):
@@ -416,6 +434,147 @@ class ModelRunner:
 
         self.prefix_transfer_metrics["cpu_prefix_writeback_submit_wall_sec"] += perf_counter() - submit_start
         return {"writeback_ids": writeback_ids, "evicted_hashes": evicted_hashes}
+
+    def replace_prefix_blocks(self, reservations):
+        """异步执行 V4 reservation：先保存 GPU-only victims，再把 CPU targets 放入同一 slots。"""
+        if not reservations:
+            return {"replacement_ids": [], "evicted_hashes": []}
+
+        # 分配 victim 的 CPU buffer 时不能淘汰两类 backing：
+        # 1. 本批 H2D 马上要读取的 targets；
+        # 2. 被判断为“已有 CPU backing”、因而省略 D2H 的 victims。
+        # 否则 metadata plan 仍认为数据安全，实际 tensor 却可能已被 CPU LRU 复用。
+        protected_hashes = {reservation[0] for reservation in reservations}
+        protected_hashes.update(
+            reservation[3] for reservation in reservations
+            if reservation[3] is not None and not reservation[5]
+        )
+        accepted = []
+        evicted_hashes = []
+        replacement_ids = []
+        for reservation in reservations:
+            target_hash, _tokens, block_id, victim_hash, _victim_tokens, needs_writeback = reservation
+            if target_hash not in self.cpu_prefix_cache:
+                break
+            cpu_victim = None
+            pooled = False
+            if needs_writeback:
+                # GPU-only victim 必须先取得 pinned CPU buffer。固定 pool 没有空间时停止，
+                # 返回已经接受的 FCFS 前缀子集；Scheduler 不会 commit 后面的 slots。
+                gpu_block = self.kv_cache[:, :, block_id]
+                cpu_victim, pooled, evicted_hash = self._take_cpu_prefix_block(
+                    gpu_block.shape, gpu_block.dtype, excluded_hashes=protected_hashes
+                )
+                if evicted_hash is not None:
+                    evicted_hashes.append(evicted_hash)
+                if cpu_victim is None:
+                    break
+            replacement_id = self.next_prefix_replacement_id
+            self.next_prefix_replacement_id += 1
+            replacement_ids.append(replacement_id)
+            accepted.append((reservation, cpu_victim, pooled))
+
+        if accepted:
+            # 提交时记下 H2D bytes。异步执行期间 target 的 CPU cache metadata 可能因
+            # 后续 LRU 更新而变化，完成路径不应再依赖它来统计本次传输。
+            h2d_bytes = sum(
+                self.cpu_prefix_cache[reservation[0]]["bytes"]
+                for reservation, _cpu_victim, _pooled in accepted
+            )
+            compute_done = torch.cuda.Event()
+            start_event = torch.cuda.Event(enable_timing=True)
+            done_event = torch.cuda.Event(enable_timing=True)
+            # copy stream 必须等当前 compute stream 使用完 victims，才能读取对应 GPU KV。
+            torch.cuda.current_stream().record_event(compute_done)
+            with torch.cuda.stream(self.copy_stream):
+                self.copy_stream.wait_event(compute_done)
+                start_event.record()
+                # 同一 stream 内严格按提交顺序执行：先完成本批所有必要 D2H，确保 victims
+                # 都已有 CPU 副本；然后 H2D 覆盖各自原来的 GPU slots。
+                for reservation, cpu_victim, _pooled in accepted:
+                    if cpu_victim is not None:
+                        block_id = reservation[2]
+                        cpu_victim.copy_(self.kv_cache[:, :, block_id], non_blocking=True)
+                for reservation, _cpu_victim, _pooled in accepted:
+                    target_hash, _tokens, block_id, *_rest = reservation
+                    source = self.cpu_prefix_cache[target_hash]["block"]
+                    self.kv_cache[:, :, block_id].copy_(source, non_blocking=True)
+                    self.cpu_prefix_cache.move_to_end(target_hash)
+                # 该 event 同时代表整批 D2H 和 H2D 完成。record 之后 Python 立即返回，
+                # 当前 batch 可继续在 compute stream 上运行，不需要后台 polling 线程。
+                done_event.record()
+            self.pending_prefix_replacements.append({
+                "ids": replacement_ids,
+                "entries": accepted,
+                "h2d_bytes": h2d_bytes,
+                "start_event": start_event,
+                "done_event": done_event,
+            })
+        return {"replacement_ids": replacement_ids, "evicted_hashes": evicted_hashes}
+
+    def _record_completed_prefix_replacement(self, pending):
+        # 这里只在 final_event 已完成后执行：D2H buffers 此时才正式进入 CPU cache，
+        # 对应 target 的 GPU residency 则由 Scheduler 在拿到 completed ids 后公开。
+        d2h_bytes = 0
+        h2d_bytes = pending["h2d_bytes"]
+        for reservation, cpu_victim, pooled in pending["entries"]:
+            target_hash, _tokens, _block_id, victim_hash, _victim_tokens, _needs_writeback = reservation
+            if cpu_victim is None:
+                continue
+            nbytes = cpu_victim.numel() * cpu_victim.element_size()
+            old = self.cpu_prefix_cache.get(victim_hash)
+            if old is not None:
+                # 正常情况下 GPU-only victim 没有 backing；若异步期间其他路径先写回了
+                # 同一 hash，则以这次完成的数据替换旧 entry，并正确回收旧 buffer。
+                self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] -= old["bytes"]
+                self._release_cpu_prefix_block(old)
+            self.cpu_prefix_cache[victim_hash] = {"block": cpu_victim, "bytes": nbytes, "pooled": pooled}
+            self.cpu_prefix_cache.move_to_end(victim_hash)
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes"] += nbytes
+            d2h_bytes += nbytes
+
+        count = len(pending["entries"])
+        self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"] = self.prefix_transfer_metrics["cpu_prefix_kv_bytes"]
+        self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"] = max(
+            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes_peak"],
+            self.prefix_transfer_metrics["cpu_prefix_cache_live_bytes"],
+        )
+        latency = pending["start_event"].elapsed_time(pending["done_event"]) / 1000
+        self.prefix_transfer_metrics["scheduler_prefetch_h2d_count"] += count
+        self.prefix_transfer_metrics["scheduler_prefetch_h2d_bytes"] += h2d_bytes
+        self.prefix_transfer_metrics["scheduler_prefetch_d2h_count"] += sum(
+            cpu_victim is not None for _reservation, cpu_victim, _pooled in pending["entries"]
+        )
+        self.prefix_transfer_metrics["scheduler_prefetch_d2h_bytes"] += d2h_bytes
+        self.prefix_transfer_metrics["scheduler_prefetch_latency_sum"] += latency
+        self.prefix_transfer_metrics["scheduler_prefetch_latency_max"] = max(
+            self.prefix_transfer_metrics["scheduler_prefetch_latency_max"], latency / count
+        )
+        self.prefix_transfer_metrics["cpu_prefix_d2h_bytes"] += d2h_bytes
+        self.prefix_transfer_metrics["cpu_prefix_h2d_bytes"] += h2d_bytes
+        self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"] = max(
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes_peak"],
+            self.prefix_transfer_metrics["cpu_prefix_kv_bytes"],
+        )
+        return self._enforce_cpu_prefix_cache_limit()
+
+    def poll_prefix_replacements(self, wait: bool = False):
+        # 普通 scheduler tick 使用 query()，立即返回；只有请求追上 prefetch 或引擎退出时
+        # 才传 wait=True 调 synchronize()。因此整个实现不需要额外 Python polling 线程。
+        if wait:
+            for pending in self.pending_prefix_replacements:
+                pending["done_event"].synchronize()
+        completed_ids = []
+        evicted_hashes = []
+        still_pending = []
+        for pending in self.pending_prefix_replacements:
+            if pending["done_event"].query():
+                evicted_hashes.extend(self._record_completed_prefix_replacement(pending))
+                completed_ids.extend(pending["ids"])
+            else:
+                still_pending.append(pending)
+        self.pending_prefix_replacements = still_pending
+        return {"completed_ids": completed_ids, "evicted_hashes": evicted_hashes}
 
     def _copy_cpu_blocks_to_gpu(self, block_copies):
         # block_copies 是 (CPU KV block, 新 GPU block id)，目前用于 CPU prefix restore。

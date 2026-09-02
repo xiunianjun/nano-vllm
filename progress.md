@@ -73,6 +73,82 @@ target_free   = target_blocks * (1 + lazy_writeback_watermark_ratio)
 
 GPU sweep 期间 CPU cap 保持为 `0`（unlimited），当前选出的 GPU watermark 为绝对值 `40 blocks`。它是当前 workload 下未发生 GPU-only eviction 的最小已测点；若需要为不同 seed 或 batch 波动留保守余量，可使用 `60 blocks`。
 
+### V4 最终方案：调度感知 Prefetch / 近似 OPT Eviction
+
+V4 基于最新 V3（GPU watermark `40 blocks`、CPU cap `15 GiB`）：V4 决定主动预取谁、replacement 淘汰谁，V3 保留 demand LRU 和后台安全写回。V3/V4 保留为独立 policy；选择 V3 时仍使用原 LRU 路径。V4 第一版不重排请求，只查看已经到达的 waiting queue，不读取未来 trace。
+
+#### 核心决策
+
+- **Look-ahead**：当前 batch 完成 admission/allocation 后，查看 waiting queue 的 FCFS 前缀，最多 `max_num_seqs` 个请求；running、active 和当前 demand blocks 始终受保护。
+- **Prefetch 上限**：同时受可见请求数、`max_num_seqs`、GPU 精确可容纳量和每 tick H2D budget 限制。容量按完整 allocation plan 的 unique blocks 计算，包含 GPU/CPU hits、共享 prefix、pending/reserved blocks 和请求 tail，不能用平均 block 数估算。
+- **Replacement victim 顺序**：窗口内不会再用的 inactive block 最先淘汰；否则 next-use 越晚越先；相同则按旧 LRU。共享 block 取所有可见请求中最早的 next-use，窗口外信息回退为 LRU。
+- **淘汰力度**：先用真正 free blocks，只补足 prefetch 缺口，即 `targeted evictions = prefetch destinations - usable free blocks`（不小于 0）。按 block slot 对齐，不按请求数对齐，也不额外多淘汰。
+- **分阶段顺序**：当前 demand allocation 和 V3 lazy writeback 仍沿原 LRU；只有 V4 主动 prefetch/replacement 按 lookahead 的近似 OPT 选 victim，同 next-use 再用 LRU 打破平局。这样 demand 不会为 GPU-only OPT victim 在关键路径同步等待；若 LRU 淘汰了窗口中将再用的 CPU-backed block，V4 可在当前 batch 计算期间异步预取回来。`40 blocks` 继续表示 LRU 前沿中 CPU-backed/pending 的安全窗口，不是预留 40 个空闲 GPU blocks。
+
+active、writeback pending、prefetch/replacement pending block 都不可选为新 victim。
+
+#### 每轮调度时序
+
+```text
+1. 非阻塞收割此前完成的 writeback/prefetch CUDA events
+2. 按 FCFS 分配本轮 demand requests
+3. 为剩余 waiting requests 临时生成 OPT prefetch/victim plan
+4. 提交定向 D2H writeback -> 同 slot H2D prefetch
+5. 恢复 LRU，用剩余 D2H budget 维护 40-block 后台安全窗口
+6. 启动当前 batch 计算，与 copy 重叠
+```
+
+固定优先级为 `当前 demand > 定向 replacement > 后台 writeback`。
+
+#### 异步与状态
+
+```text
+Python Scheduler
+  选择 victim B
+  预留 B 的 GPU slot 给目标 E
+  提交下面两个 CUDA 操作
+          ↓
+CUDA copy_stream
+  D2H：B 的 KV -> CPU
+  H2D：E 的 KV -> B 原来的 GPU slot
+  record final_event
+          ↓
+Python 立即返回，运行当前 batch
+          ↓
+下一次 scheduler tick 查询 final_event
+  完成：E 正式变成 GPU-resident
+  未完成：B 的 slot 保持 REPLACEMENT_PENDING，E 保持 PREFETCH_PENDING
+```
+
+同一 CUDA stream 自动保证 D2H 先于 H2D。B 已有 CPU backing 时省略 D2H。只有 FCFS 队头已依赖未完成的 E 时才等待一次并记录 late-prefetch stall。以后仅在单 stream 被证明是瓶颈后考虑双 stream + per-slot event，并单独做前后实验。
+
+- `WRITEBACK_PENDING`：V3 后台备份；完成前 GPU KV 有效且不可覆盖，完成后增加 CPU backing但不释放 GPU block。
+- `REPLACEMENT_PENDING`：victim slot 已预留，event 完成前不能再次分配。
+- `PREFETCH_PENDING`：目标 prefix 正在 H2D，event 完成前不能算 GPU hit。
+- 已提交 replacement 不因窗口变化取消；未提交计划每 tick 重算。event 完成后一次性更新 CPU/GPU metadata。
+
+#### Benchmark 与评估计划
+
+- 保留原 smooth Poisson hot/cold workload。dry-run 估算其 waiting 非空时窗口均值 `1.029`、p99 `2`、最大 `3`，主要用于检查 V4 不回退。
+- 单独增加 burst 压力组：仍为 hot/cold、平均 `2 req/s`，`--arrival-burst-size 4`（0.5 burst/s）；不替代原结果，不扫描热点压力。
+- V4 指标至少覆盖：窗口深度，planned/completed/useful/late/wasted prefetch blocks，定向 D2H 与 H2D bytes/time，victim 原因，pending/completion 数，stall time，以及同步 swapin、GPU eviction、recompute、TTFT/prefill、CPU peak。
+- 单测覆盖 victim 排序、active/pending 排除、共享 block 去重、容量限制、D2H->H2D 依赖、状态迁移、late prefetch 和 V3 行为不变。
+- 开发先跑小模型和单-seed smooth/burst V3-V4 配对；实质优化均做同 trace 前后对照。最终至少 5 seeds，并核对 workload、warmup、trace/output hash 和输出语义。
+
+#### V4 实现状态（2026-09-02）
+
+V4 已按上述方案实现，V3 policy 和旧 CLI 组合仍走原路径。新增内容保持在四个清晰边界内：Scheduler 生成 FCFS 可见窗口与完整容量 plan；BlockManager 在 replacement 规划期间使用 next-use victim 顺序并管理 slot reservation，其余阶段恢复 LRU；ModelRunner 在现有 `copy_stream` 上提交 D2H->H2D 和 final event；LLMEngine 只注入对应回调。`scheduler_prefetch_max_blocks=0` 表示不设单独传输上限；大于 0 时同时限制每 tick H2D 数，并由定向 D2H 先消耗同一轮后台 writeback budget。
+
+Benchmark 新增 `cpu_prefix_cache_v4_scheduler_aware`、`--enable-scheduler-aware-prefetch` 和 `--scheduler-prefetch-max-blocks`。主脚本默认只跑 smooth hot/cold 与独立 `arrival-burst-size=4` 压力组，V3/V4 均使用 40-block GPU safety window 和 15 GiB CPU cap；旧 case0/cascade/branching 代码保留但默认关闭。
+
+验证结果：
+
+- `.venv-fa28/bin/python -m unittest tests.test_benchmark_rigor -q`：26 个测试全部通过；新增测试覆盖 V4 policy 映射、next-use victim 顺序、pending->resident slot 状态、完整请求容量限制，以及 OPT 只在 replacement 规划期间生效。
+- 8B GPU copy-path smoke 使用同一 hot/cold burst trace，V3/V4 的 `trace_sha256` 均为 `ac4813991dd125f7fa01259b468b0f3d3cc11aff242b693b357afee1b13cd504`，`output_sha256` 均为 `e94f6f0fdcb84218a4b8a88a38b4ec847b87a513ab6d80add7dc8a0c3ef3799f`。
+- 该 smoke 中 V4 完成 1 个定向 replacement：1 个 GPU-only victim D2H 后，同 slot H2D 目标 prefix；completed/useful/wasted 为 `1/1/0`，pending 末态为 0，说明真实 CUDA event 与 metadata 状态闭环可用。
+- demand allocation 恢复 LRU 后，复用上述 8B smoke 的同一参数重跑：`trace_sha256`/`output_sha256` 与上述结果完全一致，replacement completed/useful/wasted 仍为 `1/1/0`，`scheduler_prefetch_wait_count=0`。改前/改后吞吐为 `8.674/8.680 req/s`，该小样本只说明没有明显回退，不作为性能结论。改后 `gpu_lru_evicted_gpu_only_block_count=1` 来自这次 targeted replacement，victim 已由同一 copy stream 的 D2H->H2D 保护，不是 demand allocation 直接覆盖。新结果保存在 `exp/v4_lru_demand_20260902/v4_after_matched.json`。
+- 这只是小容量、单次功能验证，不作为 V4 性能结论。正式结论仍需按主 hot/cold smooth/burst 配置做单-seed 开发对照，敲定参数后补至少 5 seeds。
+
 ## 3. 已完成的工程优化
 
 - decode admission 使用可驱逐 block 计数，避免逐 token 扫描 inactive LRU。

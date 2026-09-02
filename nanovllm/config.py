@@ -5,24 +5,30 @@ from transformers import AutoConfig
 
 
 class KVCachePolicy(Enum):
-    GPU_RECOMPUTE = (False, False, False, "gpu_prefix_cache_recompute_baseline")
-    GPU_LRU = (False, True, False, "gpu_prefix_cache_recompute_baseline")
-    CPU_EAGER = (True, False, False, "cpu_prefix_cache_v1")
-    CPU_EAGER_GPU_LRU = (True, True, False, "cpu_prefix_cache_v2_lru")
-    CPU_LAZY_GPU_LRU = (True, True, True, "cpu_prefix_cache_v3_lazy_writeback")
+    # tuple 依次表示：CPU offload、GPU LRU、lazy writeback、调度感知 prefetch、benchmark 名称。
+    # V4 只是给最新 V3 增加 scheduler-aware 决策；前三个能力位与 V3 完全相同。
+    GPU_RECOMPUTE = (False, False, False, False, "gpu_prefix_cache_recompute_baseline")
+    GPU_LRU = (False, True, False, False, "gpu_prefix_cache_recompute_baseline")
+    CPU_EAGER = (True, False, False, False, "cpu_prefix_cache_v1")
+    CPU_EAGER_GPU_LRU = (True, True, False, False, "cpu_prefix_cache_v2_lru")
+    CPU_LAZY_GPU_LRU = (True, True, True, False, "cpu_prefix_cache_v3_lazy_writeback")
+    CPU_LAZY_GPU_LOOKAHEAD = (True, True, True, True, "cpu_prefix_cache_v4_scheduler_aware")
 
-    def __init__(self, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool, benchmark_mode: str):
+    def __init__(self, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool, scheduler_aware: bool, benchmark_mode: str):
         self.cpu_offload = cpu_offload
         self.gpu_lru = gpu_lru
         self.lazy_writeback = lazy_writeback
+        self.scheduler_aware = scheduler_aware
         self.benchmark_mode = benchmark_mode
 
     @classmethod
-    def from_flags(cls, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool):
+    def from_flags(cls, cpu_offload: bool, gpu_lru: bool, lazy_writeback: bool, scheduler_aware: bool = False):
         if not cpu_offload:
             return cls.GPU_LRU if gpu_lru else cls.GPU_RECOMPUTE
         if not gpu_lru:
             return cls.CPU_EAGER
+        if lazy_writeback and scheduler_aware:
+            return cls.CPU_LAZY_GPU_LOOKAHEAD
         return cls.CPU_LAZY_GPU_LRU if lazy_writeback else cls.CPU_EAGER_GPU_LRU
 
 
@@ -46,6 +52,11 @@ class Config:
     enable_gpu_lru_retention: bool = True
     # V3: 不再 prefill 后全量写回 CPU，只维护一段可安全淘汰的 CPU-backed inactive window。
     enable_lazy_cpu_kv_writeback: bool = False
+    # V4：查看已经到达的 FCFS waiting window，提前选择 victim 并预取 CPU prefix。
+    enable_scheduler_aware_prefetch: bool = False
+    # 每轮最多预取多少个 block；定向 D2H 会先消耗同一份后台 writeback budget。
+    # 0 表示不另设传输上限，实际数量仍受完整请求容量和可用 GPU slot 限制。
+    scheduler_prefetch_max_blocks: int = 0
     # V3 bounded CPU cache: prefer evicting redundant GPU-resident CPU copies.
     # Disable only for the pure-CPU-LRU ablation.
     enable_gpu_aware_cpu_eviction: bool = True
@@ -64,13 +75,17 @@ class Config:
         assert 1 <= self.tensor_parallel_size <= 8
         assert self.lazy_writeback_watermark_ratio >= 0
         assert self.lazy_writeback_target_blocks >= 0
+        assert self.scheduler_prefetch_max_blocks >= 0
         assert self.cpu_prefix_cache_gb_limit >= 0
         assert self.cpu_prefix_pool_gb >= 0
         self.kv_cache_policy = KVCachePolicy.from_flags(
             self.enable_cpu_kv_offload,
             self.enable_gpu_lru_retention,
             self.enable_lazy_cpu_kv_writeback,
+            self.enable_scheduler_aware_prefetch,
         )
+        if self.enable_scheduler_aware_prefetch:
+            assert self.enable_cpu_kv_offload and self.enable_gpu_lru_retention and self.enable_lazy_cpu_kv_writeback
         if self.enable_cpu_kv_offload and self.cpu_prefix_cache_gb_limit > 0:
             # A configured CPU cache limit is also a physical pinned-memory cap.
             # Use a fixed pool so the writeback path cannot allocate beyond it.
