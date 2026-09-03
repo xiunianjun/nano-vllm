@@ -113,8 +113,9 @@ class Scheduler:
             "scheduler_prefetch_targeted_writeback_count": 0,
             "scheduler_prefetch_wait_count": 0,
             "scheduler_prefetch_wait_wall_sec": 0.0,
-            "scheduler_victim_no_visible_next_use_count": 0,
-            "scheduler_victim_future_next_use_count": 0,
+            "scheduler_lookahead_touch_block_count": 0,
+            "scheduler_prefetch_capacity_rejected_request_count": 0,
+            "scheduler_prefetch_no_cpu_target_count": 0,
         }
         self.block_manager.reset_metrics()
 
@@ -153,8 +154,11 @@ class Scheduler:
             "scheduler_prefetch_targeted_writeback_count": self.metrics["scheduler_prefetch_targeted_writeback_count"],
             "scheduler_prefetch_wait_count": self.metrics["scheduler_prefetch_wait_count"],
             "scheduler_prefetch_wait_wall_sec": self.metrics["scheduler_prefetch_wait_wall_sec"],
-            "scheduler_victim_no_visible_next_use_count": self.metrics["scheduler_victim_no_visible_next_use_count"],
-            "scheduler_victim_future_next_use_count": self.metrics["scheduler_victim_future_next_use_count"],
+            "scheduler_lookahead_touch_block_count": self.metrics["scheduler_lookahead_touch_block_count"],
+            "scheduler_prefetch_capacity_rejected_request_count": self.metrics[
+                "scheduler_prefetch_capacity_rejected_request_count"
+            ],
+            "scheduler_prefetch_no_cpu_target_count": self.metrics["scheduler_prefetch_no_cpu_target_count"],
             "pending_prefix_replacement_count": len(self.pending_prefix_replacements),
         }
         metrics.update(self.block_manager.get_metrics(
@@ -167,87 +171,90 @@ class Scheduler:
         return metrics
 
     def _visible_waiting(self):
-        # 第一版不偷看未来 trace，也不重排请求；只看已经到达的 FCFS 队头窗口。
-        return list(self.waiting)[:self.max_num_seqs]
+        # V4 只看已到达的 FCFS N+1/N+2；max_num_seqs 小于 2 时自然收紧。
+        return list(self.waiting)[:min(2, self.max_num_seqs)]
 
-    def _update_v4_victim_order(self, record_window: bool = True):
-        if not self.enable_scheduler_aware_prefetch:
-            return
-        visible = self._visible_waiting()
-        if record_window:
-            self.metrics["scheduler_visible_request_count_sum"] += len(visible)
-            self.metrics["scheduler_visible_request_count_max"] = max(
-                self.metrics["scheduler_visible_request_count_max"], len(visible)
-            )
-        self.block_manager.update_victim_order(visible)
+    def _prefix_sources(self, seq: Sequence, planned_gpu_prefixes=None):
+        """返回连续 prefix 来源和其中真实 GPU-resident 的 block ids。"""
+        planned_gpu_prefixes = planned_gpu_prefixes or {}
+        sources = []
+        gpu_block_ids = set()
+        for block_idx in range(max(seq.num_blocks - 1, 0)):
+            tokens = seq.block_token_ids(block_idx)
+            h = seq.block_hash(block_idx)
+            block_id = self.block_manager.hash_to_block_id.get(h)
+            if block_id is not None and self.block_manager.blocks[block_id].token_ids == tokens:
+                sources.append(("gpu", h, tokens))
+                gpu_block_ids.add(block_id)
+            elif h in self.block_manager.pending_prefetch_hashes:
+                sources.append(("pending", h, tokens))
+            elif planned_gpu_prefixes.get(h) == tokens:
+                sources.append(("planned", h, tokens))
+            elif self.block_manager.has_cpu_block(h, tokens):
+                sources.append(("cpu", h, tokens))
+            else:
+                break
+        return sources, gpu_block_ids
 
-    def _make_v4_prefetch_plan(self):
-        """按 FCFS 接纳能完整放入 GPU 的请求，并返回其中尚在 CPU 的 prefix。"""
-        # protected_gpu：已接纳请求将直接命中的 GPU blocks，后续选 victim 必须避开。
-        # target_hashes：已经 pending 或本轮已经选中的 prefix，用于跨请求共享去重。
-        # capacity_used：这些请求未来真正还需占用的新 slot 数量。
+    def _touch_v4_lookahead(self, visible):
+        # 先 touch N+2，再 touch N+1，所以最后 N+1 位于 LRU 最热端。
+        # 请求内部倒序 touch，让更通用的短 prefix（靠近 root）更热。
+        touched = 0
+        for seq in reversed(visible):
+            sources, _gpu_block_ids = self._prefix_sources(seq)
+            ordered = [
+                self.block_manager.hash_to_block_id[h]
+                for source, h, _tokens in sources
+                if source == "gpu"
+            ]
+            touched += self.block_manager.touch_inactive_blocks(reversed(ordered))
+        self.metrics["scheduler_lookahead_touch_block_count"] += touched
+
+    def _make_v4_prefetch_plan(self, visible=None, decode_reserve: int = 0):
+        """按 FCFS 为 N+1/N+2 规划部分预取，不要求整个 request 都能放下。"""
+        visible = self._visible_waiting() if visible is None else visible
+        # visible request 已经在 GPU 的 prefix 只做 touch，不能反过来被本轮 prefetch
+        # 选作 victim。pending target 已经占有 slot，也不会被重复提交。
         protected_gpu = set()
-        targets = []
-        target_hashes = set(self.block_manager.pending_prefetch_hashes)
-        capacity_used = 0
-        planned_requests = 0
+        for seq in visible:
+            if not seq.block_table:
+                _sources, seq_gpu = self._prefix_sources(seq)
+                protected_gpu.update(seq_gpu)
 
-        for seq in self._visible_waiting():
+        # 预取只使用当前可驱逐容量，并给下一轮可能跨 block 边界的 decode 留 slot。
+        # scheduler_prefetch_max_blocks 是额外的传输上限；0 表示只受实际容量限制。
+        budget = max(self.block_manager._available_block_count(protected_gpu) - decode_reserve, 0)
+        if self.scheduler_prefetch_max_blocks:
+            budget = min(budget, self.scheduler_prefetch_max_blocks)
+
+        targets = []
+        planned_gpu_prefixes = {}
+        planned_requests = 0
+        for seq in visible:
             if seq.block_table:
                 continue
-            sources = []
-            seq_gpu = set()
-            # 为请求构造连续 prefix 来源：[gpu | pending | cpu]。遇到第一个 miss
-            # 就停止，剩余部分都必须走正常 prefill，不能跳跃命中后面的 block。
-            for block_idx in range(max(seq.num_blocks - 1, 0)):
-                tokens = seq.block_token_ids(block_idx)
-                h = seq.block_hash(block_idx)
-                block_id = self.block_manager.hash_to_block_id.get(h)
-                if block_id is not None and self.block_manager.blocks[block_id].token_ids == tokens:
-                    sources.append("gpu")
-                    seq_gpu.add(block_id)
-                elif h in self.block_manager.pending_prefetch_hashes:
-                    sources.append("pending")
-                elif self.block_manager.has_cpu_block(h, tokens):
-                    sources.append("cpu")
-                else:
-                    break
+            sources, _seq_gpu = self._prefix_sources(seq, planned_gpu_prefixes)
+            cpu_targets = [(h, tokens) for source, h, tokens in sources if source == "cpu"]
+            if not cpu_targets:
+                self.metrics["scheduler_prefetch_no_cpu_target_count"] += 1
+                continue
 
-            new_targets = []
-            # 只预取仍在 CPU 的连续 prefix；GPU hit 和已经 pending 的 prefix 不重复提交。
-            # 多个 visible requests 共享同一 hash 时，本轮也只为它保留一个 slot。
-            for block_idx, source in enumerate(sources):
-                if source != "cpu":
-                    continue
-                h = seq.block_hash(block_idx)
-                if h not in target_hashes:
-                    new_targets.append((h, seq.block_token_ids(block_idx)))
-
-            # 精确容量口径：
-            #   新 slot = 当前请求的 uncached suffix + 本轮首次出现的 CPU targets。
-            # GPU/pending prefix 已有物理 slot，不重复计数；共享 target 只计一次。
-            suffix_blocks = seq.num_blocks - len(sources)
-            needed = suffix_blocks + len(new_targets)
-            candidate_protected = protected_gpu | seq_gpu
-            if capacity_used + needed > self.block_manager._available_block_count(candidate_protected):
-                # 保持 FCFS：队头请求完整放不下时就停止，不能越过它预取后面的请求。
+            accepted = cpu_targets[:max(budget - len(targets), 0)]
+            if accepted:
+                targets.extend(accepted)
+                planned_gpu_prefixes.update(accepted)
+                planned_requests += 1
+            if len(accepted) < len(cpu_targets):
+                # N+1 只能预取一部分时就停下，不越过它去照顾 N+2。
+                self.metrics["scheduler_prefetch_capacity_rejected_request_count"] += 1
                 break
-            protected_gpu = candidate_protected
-            capacity_used += needed
-            planned_requests += 1
-            targets.extend(new_targets)
-            target_hashes.update(h for h, _tokens in new_targets)
 
-        if self.scheduler_prefetch_max_blocks:
-            # max_num_seqs 限制可见请求数；这里的 block budget 只进一步限制传输量。
-            # 即使配置为 0（不限），上面的完整请求容量检查仍保证不会超配 GPU slot。
-            targets = targets[:self.scheduler_prefetch_max_blocks]
         return planned_requests, targets, protected_gpu
 
-    def _start_v4_prefetch(self):
+    def _start_v4_prefetch(self, visible=None, decode_reserve: int = 0):
         if not self.enable_scheduler_aware_prefetch or not self.waiting:
             return 0, 0
-        planned_requests, targets, protected_gpu = self._make_v4_prefetch_plan()
+        planned_requests, targets, protected_gpu = self._make_v4_prefetch_plan(visible, decode_reserve)
         if not targets:
             return 0, 0
         reservations = self.block_manager.plan_prefetch_reservations(targets, protected_gpu)
@@ -275,26 +282,12 @@ class Scheduler:
         self.metrics["scheduler_prefetch_planned_block_count"] += len(accepted)
         self.metrics["scheduler_prefetch_targeted_eviction_count"] += sum(r[3] is not None for r in accepted)
         self.metrics["scheduler_prefetch_targeted_writeback_count"] += sum(r[5] for r in accepted)
-        for reservation in accepted:
-            block_id, victim_hash = reservation[2], reservation[3]
-            if victim_hash is None:
-                continue
-            key = (
-                "scheduler_victim_future_next_use_count"
-                if victim_hash in self.block_manager.visible_next_use
-                else "scheduler_victim_no_visible_next_use_count"
-            )
-            self.metrics[key] += 1
         return sum(r[5] for r in accepted), len(accepted)
 
-    def _plan_v4_prefetch(self):
-        """在 demand 之后临时使用 OPT 规划 replacement，提交后立即恢复 LRU。"""
-        self._update_v4_victim_order()
-        targeted_writebacks, replacement_count = self._start_v4_prefetch()
-        # OPT 的任务到 slot reservation 提交就结束了。下面的 V3 后台写回
-        # 必须继续保护 LRU 前沿，下一轮 demand allocation 也会按 LRU 驱逐。
-        self.block_manager.clear_victim_order()
-        return targeted_writebacks, replacement_count
+    def _plan_v4_prefetch(self, visible, decode_reserve: int):
+        """V4 只提供 touch/prefetch hint；所有 replacement victim 仍按 V3 LRU 选择。"""
+        self._touch_v4_lookahead(visible)
+        return self._start_v4_prefetch(visible, decode_reserve)
 
     def _poll_prefix_replacements(self, wait: bool = False):
         if not self.pending_prefix_replacements:
@@ -401,16 +394,34 @@ class Scheduler:
         self._submit_prefix_writeback_entries(entries, release_on_complete, lazy=False)
         seq.eager_prefix_writeback_done = True
 
+    def _decode_allocation_reserve_after_current_step(self, scheduled_seqs) -> int:
+        """精确预留下次 decode 跨 block 边界所需的 slots，而不是预留 max_num_seqs。"""
+        scheduled_ids = {id(seq) for seq in scheduled_seqs}
+        reserve = 0
+        for seq in list(self.running)[:self.max_num_seqs]:
+            future_len = len(seq)
+            if id(seq) in scheduled_ids:
+                prefill_finishes = seq.is_prefill and (
+                    seq.num_cached_tokens + seq.num_scheduled_tokens == seq.num_tokens
+                )
+                if not seq.is_prefill or prefill_finishes:
+                    # 本轮 compute 后会 append 一个 token。若已确定达到
+                    # max_tokens，请求会结束，不再为它预留 decode block。
+                    if seq.num_completion_tokens + 1 >= seq.max_tokens:
+                        continue
+                    future_len += 1
+            if future_len % self.block_size == 1:
+                reserve += 1
+        return reserve
+
     def _maintain_lazy_writeback_window(self, max_entries: int | None = None):
-        # V3 专用入口：按 cache 压力维护 inactive LRU 的 CPU-backed victim 窗口。
+        # V3 原始逻辑：按 cache 压力维护 inactive LRU 的 CPU-backed victim 窗口。
         # profile 指标只拆 Python 热路径，不改变异步 D2H 的执行语义。
         if not self.enable_lazy_cpu_kv_writeback:
             return
         maintain_start = perf_counter()
         self.metrics["lazy_writeback_maintain_call_count"] += 1
 
-        # V3 的触发点只放在真正发生 allocation 之后：
-        # free blocks 跌破 safety window，才扫描 inactive LRU 前沿补 CPU-backed victim。
         pending_start = perf_counter()
         pending_hashes = self._pending_writeback_hashes()
         self.metrics["lazy_writeback_pending_hash_wall_sec"] += perf_counter() - pending_start
@@ -434,20 +445,28 @@ class Scheduler:
         if not self.enable_lazy_cpu_kv_writeback:
             return
         self.metrics["lazy_writeback_after_alloc_check_count"] += 1
-        # 真正 free 的 block 是零成本容量；inactive block 仍保存旧 KV，覆盖它才算驱逐。
-        # 只有 free 水位不足时才启动 lazy writeback，避免每个 decode step 都扫 LRU。
+        # 只有真正 allocation 消耗了容量，或 V4 prefetch 占用了 slot，才走到这里。
+        # free 水位不足时补固定 watermark；不预测下一轮，也不动态扩大窗口。
         if self.block_manager.free_block_count() >= self.lazy_writeback_target_blocks:
             self.metrics["lazy_writeback_after_alloc_skip_count"] += 1
             return
         self.metrics["lazy_writeback_after_alloc_trigger_count"] += 1
         self._maintain_lazy_writeback_window(max_entries)
 
-    def _v4_background_writeback_budget(self, targeted_writebacks: int):
-        # 定向 replacement 比后台安全窗口优先。显式设置 block budget 时，先扣掉
-        # 本轮为 victim 做的 D2H，余量才交给 V3 lazy writeback。
-        if not self.scheduler_prefetch_max_blocks:
-            return None
-        return max(self.scheduler_prefetch_max_blocks - targeted_writebacks, 0)
+    def _prepare_v4_prefetch(self, scheduled_seqs):
+        """本轮 allocation 完成后，利用本轮 GPU compute 覆盖下一轮的部分 H2D。"""
+        if not self.enable_scheduler_aware_prefetch:
+            return
+        visible = self._visible_waiting()
+        self.metrics["scheduler_visible_request_count_sum"] += len(visible)
+        self.metrics["scheduler_visible_request_count_max"] = max(
+            self.metrics["scheduler_visible_request_count_max"], len(visible)
+        )
+        decode_reserve = self._decode_allocation_reserve_after_current_step(scheduled_seqs)
+        self._plan_v4_prefetch(visible, decode_reserve)
+        # touch 会改变 LRU 前沿，prefetch 还可能占用 free/LRU slot；两者完成后都用
+        # 完全相同的 V3 逻辑重新检查并补回固定安全窗口。
+        self._maintain_lazy_writeback_window_after_allocation()
 
     # 回收一下写完的 prefix blocks，用于后续使用。wait=True 时阻塞等待
     def _poll_prefix_writebacks(self, wait: bool = False):
@@ -501,7 +520,6 @@ class Scheduler:
         self._poll_prefix_writebacks()
         scheduled_seqs = []
         num_batched_tokens = 0
-        allocated_this_tick = False
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
@@ -558,15 +576,12 @@ class Scheduler:
                 break
             if not seq.block_table:
                 restore_entries = self.block_manager.allocate(seq, plan)    # GPU hit 直接引用，CPU hit 先分配 GPU block，miss/全新请求分配空 block
-                allocated_this_tick = True
                 if restore_entries:
                     assert self.restore_prefix_blocks is not None
                     self.restore_prefix_blocks(restore_entries) # 同步 H2D 后再继续 prefill 剩余 suffix。
-                # restore plan 是按 allocation 前的 CPU cache 快照生成的。必须先消费它，
-                # 再允许 bounded CPU pool 的 lazy writeback 淘汰 LRU backing；否则同轮
-                # writeback 可能复用 restore_entries 仍要读取的 CPU block。
-                if not v4:
-                    self._maintain_lazy_writeback_window_after_allocation()
+                # V3 的原始时机保持不变：每个 request 完成 allocation 和 demand restore
+                # 后立刻补固定安全窗口。V4 完整继承，不把它挪到 tick 末。
+                self._maintain_lazy_writeback_window_after_allocation()
             seq.num_scheduled_tokens = min(num_tokens, remaining)
             self.metrics["prefill_token_count"] += seq.num_scheduled_tokens
             if seq.recompute_pending_tokens:
@@ -581,14 +596,10 @@ class Scheduler:
             scheduled_seqs.append(seq)
 
         if scheduled_seqs:
+            # V4 只在 V3 demand/allocation 全部完成后追加 look-ahead prefetch；
+            # V1/V2/V3 不经过这个入口。
             if v4:
-                # demand allocation 保持 V3 LRU；完成后才查看剩余 waiting window，
-                # 用临时 OPT 顺序提交下一批异步 replacement。
-                targeted_writebacks, replacement_count = self._plan_v4_prefetch()
-                if allocated_this_tick or replacement_count:
-                    self._maintain_lazy_writeback_window_after_allocation(
-                        self._v4_background_writeback_budget(targeted_writebacks)
-                    )
+                self._prepare_v4_prefetch(scheduled_seqs)
             return scheduled_seqs, True         # 优先做prefill，且只做prefill
 
         # decode
@@ -609,20 +620,12 @@ class Scheduler:
                 seq.is_prefill = False
                 allocated = self.block_manager.may_append(seq)
                 if allocated:
-                    allocated_this_tick = True
-                    if not v4:
-                        self._maintain_lazy_writeback_window_after_allocation()
+                    self._maintain_lazy_writeback_window_after_allocation()
                 scheduled_seqs.append(seq)
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))   # 重新插入队头，保证纯粹的FCFS
         if v4:
-            # decode tick 同样利用本轮计算时间预取 waiting requests；优先级仍是
-            # 当前 demand > 定向 replacement > 剩余 budget 的 V3 后台 writeback。
-            targeted_writebacks, replacement_count = self._plan_v4_prefetch()
-            if allocated_this_tick or replacement_count:
-                self._maintain_lazy_writeback_window_after_allocation(
-                    self._v4_background_writeback_budget(targeted_writebacks)
-                )
+            self._prepare_v4_prefetch(scheduled_seqs)
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):

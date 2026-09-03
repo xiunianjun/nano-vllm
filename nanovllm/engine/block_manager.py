@@ -59,12 +59,6 @@ class BlockManager:
         # O(1) decode admission: the old path scanned the full inactive LRU
         # for every generated token.
         self.evictable_inactive_block_count = 0
-        # V4 只在主动 prefetch/replacement 规划期间临时设置这个顺序。
-        # demand allocation 和 V3 lazy writeback 仍使用 inactive_block_ids 的原始 LRU，
-        # 避免为了严格遵守 OPT 而在当前请求的关键路径上等待 D2H。
-        self.victim_order: list[int] = []
-        # hash -> 在可见 FCFS window 中最早会被哪个 request 使用；位置越大，next-use 越远。
-        self.visible_next_use: dict[int, int] = {}
         # target hash -> 已预留的 GPU slot。pending 目标不能算 GPU hit，但规划时要避免重复预取。
         self.pending_prefetch_hashes: dict[int, int] = {}
         self.reset_metrics()
@@ -134,47 +128,17 @@ class BlockManager:
         return len(self.free_block_ids)
 
     def ordered_inactive_block_ids(self):
-        """返回当前 victim 顺序；V4 规划之外自然回退到 LRU。"""
-        ordered = [block_id for block_id in self.victim_order if block_id in self.inactive_block_ids]
-        seen = set(ordered)
-        ordered.extend(block_id for block_id in self.inactive_block_ids if block_id not in seen)
-        return ordered
+        """返回唯一的 victim 顺序：OrderedDict 左侧的 LRU 最先。"""
+        return list(self.inactive_block_ids)
 
-    def update_victim_order(self, visible_seqs):
-        """按可见 FCFS next-use 重排 inactive blocks，相同 next-use 再按 LRU。"""
-        next_use = {}
-        for position, seq in enumerate(visible_seqs):
-            # prefix cache 只能连续命中。中间一块在 GPU/CPU/pending 中都不存在时，
-            # 后面的 hash 即使碰巧存在也不能直接复用，因此不应算作可见 next-use。
-            for block_idx in range(max(seq.num_blocks - 1, 0)):
-                tokens = seq.block_token_ids(block_idx)
-                h = seq.block_hash(block_idx)
-                block_id = self.hash_to_block_id.get(h)
-                available = (
-                    block_id is not None and self.blocks[block_id].token_ids == tokens
-                ) or self.has_cpu_block(h, tokens) or h in self.pending_prefetch_hashes
-                if not available:
-                    break
-                next_use[h] = min(position, next_use.get(h, position))
-        self.visible_next_use = next_use
-        lru_position = {block_id: i for i, block_id in enumerate(self.inactive_block_ids)}
-        # Python tuple 升序恰好表达目标优先级：
-        #   1. hash 不在 next_use 中（False）最先淘汰；
-        #   2. 在 window 中会使用时，position 越大越先淘汰；
-        #   3. 前两项相同，原 LRU 中越老越先淘汰。
-        self.victim_order = sorted(
-            self.inactive_block_ids,
-            key=lambda block_id: (
-                self.blocks[block_id].hash in next_use,
-                -next_use.get(self.blocks[block_id].hash, 0),
-                lru_position[block_id],
-            ),
-        )
-
-    def clear_victim_order(self):
-        """结束 V4 规划阶段，让 demand allocation 和 V3 安全窗口恢复 LRU。"""
-        self.victim_order = []
-        self.visible_next_use = {}
+    def touch_inactive_blocks(self, block_ids) -> int:
+        """只更新 inactive LRU recency，不增加引用，也不计真实 GPU hit。"""
+        touched = 0
+        for block_id in block_ids:
+            if block_id in self.inactive_block_ids:
+                self.inactive_block_ids.move_to_end(block_id)
+                touched += 1
+        return touched
 
     @classmethod
     def compute_hash(cls, token_ids: list[int], prefix: int = -1):
@@ -335,7 +299,7 @@ class BlockManager:
         )
 
     def plan_prefetch_reservations(self, targets, protected_block_ids: set[int]):
-        """给 CPU prefix 配 GPU slot：先用 free slot，不够时再按 V4 顺序选择 victim。"""
+        """给 CPU prefix 配 GPU slot：先用 free slot，不够时再按统一 LRU 选择 victim。"""
         # reservation tuple：
         # (target_hash, target_tokens, slot_id, victim_hash, victim_tokens, needs_writeback)
         # protected 是 visible requests 已经会复用的 GPU prefix，不能为了预取把它们反向淘汰。

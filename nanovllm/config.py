@@ -52,10 +52,9 @@ class Config:
     enable_gpu_lru_retention: bool = True
     # V3: 不再 prefill 后全量写回 CPU，只维护一段可安全淘汰的 CPU-backed inactive window。
     enable_lazy_cpu_kv_writeback: bool = False
-    # V4：查看已经到达的 FCFS waiting window，提前选择 victim 并预取 CPU prefix。
+    # V4：查看已经到达的 FCFS N+1/N+2，对 GPU hit 做 touch，并预取部分 CPU prefix。
     enable_scheduler_aware_prefetch: bool = False
-    # 每轮最多预取多少个 block；定向 D2H 会先消耗同一份后台 writeback budget。
-    # 0 表示不另设传输上限，实际数量仍受完整请求容量和可用 GPU slot 限制。
+    # 每轮最多预取多少个 block；0 表示不另设传输上限，实际数量仍受可用 GPU slot 限制。
     scheduler_prefetch_max_blocks: int = 0
     # V3 bounded CPU cache: prefer evicting redundant GPU-resident CPU copies.
     # Disable only for the pure-CPU-LRU ablation.
