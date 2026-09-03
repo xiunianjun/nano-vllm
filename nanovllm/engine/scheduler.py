@@ -463,10 +463,12 @@ class Scheduler:
             self.metrics["scheduler_visible_request_count_max"], len(visible)
         )
         decode_reserve = self._decode_allocation_reserve_after_current_step(scheduled_seqs)
-        self._plan_v4_prefetch(visible, decode_reserve)
-        # touch 会改变 LRU 前沿，prefetch 还可能占用 free/LRU slot；两者完成后都用
-        # 完全相同的 V3 逻辑重新检查并补回固定安全窗口。
-        self._maintain_lazy_writeback_window_after_allocation()
+        _targeted_writebacks, replacement_count = self._plan_v4_prefetch(visible, decode_reserve)
+        # V4 可以独立叠加在 V2 eager backing 上，此时没有 V3 安全窗口。
+        # 只有 V2+V3+V4 且 prefetch 真正占用了 slot，才需要用原 V3
+        # 逻辑补回被 replacement 消耗的 safe victim；单纯 touch 不消耗容量。
+        if self.enable_lazy_cpu_kv_writeback and replacement_count:
+            self._maintain_lazy_writeback_window_after_allocation()
 
     # 回收一下写完的 prefix blocks，用于后续使用。wait=True 时阻塞等待
     def _poll_prefix_writebacks(self, wait: bool = False):

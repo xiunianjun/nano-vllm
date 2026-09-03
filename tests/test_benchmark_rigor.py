@@ -238,6 +238,10 @@ class KVCachePolicyTests(unittest.TestCase):
         self.assertIs(KVCachePolicy.from_flags(False, True, True), KVCachePolicy.GPU_LRU)
         self.assertIs(KVCachePolicy.from_flags(True, False, True), KVCachePolicy.CPU_EAGER)
         self.assertIs(KVCachePolicy.from_flags(True, True, False), KVCachePolicy.CPU_EAGER_GPU_LRU)
+        self.assertIs(
+            KVCachePolicy.from_flags(True, True, False, True),
+            KVCachePolicy.CPU_EAGER_GPU_LOOKAHEAD,
+        )
         self.assertIs(KVCachePolicy.from_flags(True, True, True), KVCachePolicy.CPU_LAZY_GPU_LRU)
         self.assertIs(
             KVCachePolicy.from_flags(True, True, True, True),
@@ -541,21 +545,56 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         self.assertEqual(calls, [None])
         self.assertEqual(scheduler.metrics["lazy_writeback_after_alloc_trigger_count"], 1)
 
-    def test_v4_prefetch_is_followed_by_the_same_v3_window_check(self):
+    def test_v2_v4_prefetch_does_not_enable_v3_window(self):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.enable_scheduler_aware_prefetch = True
+        scheduler.enable_lazy_cpu_kv_writeback = False
         scheduler.waiting = deque()
         scheduler.running = deque()
         scheduler.max_num_seqs = 8
         scheduler.block_size = 4
         scheduler.metrics = defaultdict(int)
         events = []
-        scheduler._plan_v4_prefetch = lambda _visible, _reserve: events.append("prefetch")
+        scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 1))
+        scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
+
+        scheduler._prepare_v4_prefetch([])
+
+        self.assertEqual(events, ["prefetch"])
+
+    def test_v3_v4_replacement_is_followed_by_the_same_v3_window_check(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_scheduler_aware_prefetch = True
+        scheduler.enable_lazy_cpu_kv_writeback = True
+        scheduler.waiting = deque()
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 8
+        scheduler.block_size = 4
+        scheduler.metrics = defaultdict(int)
+        events = []
+        scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 1))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
 
         scheduler._prepare_v4_prefetch([])
 
         self.assertEqual(events, ["prefetch", "v3_window"])
+
+    def test_v3_v4_touch_only_does_not_rescan_v3_window(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_scheduler_aware_prefetch = True
+        scheduler.enable_lazy_cpu_kv_writeback = True
+        scheduler.waiting = deque()
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 8
+        scheduler.block_size = 4
+        scheduler.metrics = defaultdict(int)
+        events = []
+        scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 0))
+        scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
+
+        scheduler._prepare_v4_prefetch([])
+
+        self.assertEqual(events, ["prefetch"])
 
 
 if __name__ == "__main__":

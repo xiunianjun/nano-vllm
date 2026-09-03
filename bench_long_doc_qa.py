@@ -429,9 +429,9 @@ def main():
     if args.scheduler_prefetch_max_blocks < 0:
         raise ValueError("--scheduler-prefetch-max-blocks must be non-negative")
     if args.enable_scheduler_aware_prefetch and not (
-        args.enable_cpu_kv_offload and args.enable_gpu_lru_retention and args.enable_lazy_cpu_kv_writeback
+        args.enable_cpu_kv_offload and args.enable_gpu_lru_retention
     ):
-        raise ValueError("V4 prefetch requires CPU offload, GPU LRU retention, and lazy writeback")
+        raise ValueError("V4 prefetch requires CPU offload and GPU LRU retention")
     hf_config = AutoConfig.from_pretrained(args.model)
     tokenizer = AutoTokenizer.from_pretrained(args.model, use_fast=True)
     ids = choose_token_ids(tokenizer)

@@ -6,11 +6,12 @@ from transformers import AutoConfig
 
 class KVCachePolicy(Enum):
     # tuple 依次表示：CPU offload、GPU LRU、lazy writeback、调度感知 prefetch、benchmark 名称。
-    # V4 只是给最新 V3 增加 scheduler-aware 决策；前三个能力位与 V3 完全相同。
+    # V3 lazy writeback 和 V4 scheduler-aware prefetch 是两个正交能力，可以独立开启。
     GPU_RECOMPUTE = (False, False, False, False, "gpu_prefix_cache_recompute_baseline")
     GPU_LRU = (False, True, False, False, "gpu_prefix_cache_recompute_baseline")
     CPU_EAGER = (True, False, False, False, "cpu_prefix_cache_v1")
     CPU_EAGER_GPU_LRU = (True, True, False, False, "cpu_prefix_cache_v2_lru")
+    CPU_EAGER_GPU_LOOKAHEAD = (True, True, False, True, "cpu_prefix_cache_v2_v4_scheduler_aware")
     CPU_LAZY_GPU_LRU = (True, True, True, False, "cpu_prefix_cache_v3_lazy_writeback")
     CPU_LAZY_GPU_LOOKAHEAD = (True, True, True, True, "cpu_prefix_cache_v4_scheduler_aware")
 
@@ -27,8 +28,8 @@ class KVCachePolicy(Enum):
             return cls.GPU_LRU if gpu_lru else cls.GPU_RECOMPUTE
         if not gpu_lru:
             return cls.CPU_EAGER
-        if lazy_writeback and scheduler_aware:
-            return cls.CPU_LAZY_GPU_LOOKAHEAD
+        if scheduler_aware:
+            return cls.CPU_LAZY_GPU_LOOKAHEAD if lazy_writeback else cls.CPU_EAGER_GPU_LOOKAHEAD
         return cls.CPU_LAZY_GPU_LRU if lazy_writeback else cls.CPU_EAGER_GPU_LRU
 
 
@@ -84,7 +85,7 @@ class Config:
             self.enable_scheduler_aware_prefetch,
         )
         if self.enable_scheduler_aware_prefetch:
-            assert self.enable_cpu_kv_offload and self.enable_gpu_lru_retention and self.enable_lazy_cpu_kv_writeback
+            assert self.enable_cpu_kv_offload and self.enable_gpu_lru_retention
         if self.enable_cpu_kv_offload and self.cpu_prefix_cache_gb_limit > 0:
             # A configured CPU cache limit is also a physical pinned-memory cap.
             # Use a fixed pool so the writeback path cannot allocate beyond it.

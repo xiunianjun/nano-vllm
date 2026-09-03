@@ -80,6 +80,15 @@ run_once() {
       --enable-gpu-lru-retention
       --cpu-prefix-cache-gb-limit "$EAGER_CPU_PREFIX_CACHE_GB_LIMIT"
     )
+  elif [[ "$mode" == "v2_v4" ]]; then
+    # V2 eager CPU backing + V4 scheduler-aware prefetch，不开启 V3 lazy window。
+    offload_args=(
+      --enable-cpu-kv-offload
+      --enable-gpu-lru-retention
+      --no-enable-lazy-cpu-kv-writeback
+      --enable-scheduler-aware-prefetch
+      --cpu-prefix-cache-gb-limit "$EAGER_CPU_PREFIX_CACHE_GB_LIMIT"
+    )
   elif [[ "$mode" == "v3" ]]; then
     offload_args=(
       --enable-cpu-kv-offload
@@ -260,7 +269,7 @@ def stats(values):
 
 
 mode_rows = {}
-for mode in ("baseline", "v1", "v2", "v3", "v4"):
+for mode in ("baseline", "v1", "v2", "v2_v4", "v3", "v4"):
     rows = {}
     for path in sorted(case_dir.glob(f"{mode}_run*.json")):
         match = re.search(r"_run(\d+)\.json$", path.name)
@@ -321,6 +330,7 @@ add_speedups(summary["comparison"], "v2", "v1", "v2_over_v1")
 add_speedups(summary["comparison"], "v3", "v2", "v3_over_v2")
 add_speedups(summary["comparison"], "v3", "v1", "v3_over_v1")
 add_speedups(summary["comparison"], "v4", "v3", "v4_over_v3")
+add_speedups(summary["comparison"], "v2_v4", "v2", "v2_v4_over_v2")
 
 trace_mismatches = []
 output_mismatches = []
