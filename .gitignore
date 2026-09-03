@@ -165,12 +165,16 @@ venv.bak/
 /exp/**/v2_run*.json
 /exp/**/v2_reference_run*.json
 /exp/**/v3_run*.json
+/exp/**/v4_run*.json
+/exp/**/v2_v4_run*.json
 /exp/**/*.log
+/exp/**/run.pid
 /exp/**/*.pt
 /exp/**/*.pth
 /exp/**/*.safetensors
 /exp/**/*.npy
 /exp/**/*.npz
+/exp/v4_lru_demand_*/
 
 # Spyder project settings
 .spyderproject
