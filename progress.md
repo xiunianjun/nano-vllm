@@ -145,6 +145,19 @@ Python 立即返回，运行当前 batch
 
 Benchmark 模式映射为：`v2`=V2、`v3`=V2+V3、`v2_v4`=V2+V4、`v4`=V2+V3+V4。V2+V4 的 JSON mode 为 `cpu_prefix_cache_v2_v4_scheduler_aware`。`.venv-fa28/bin/python -m unittest discover -s tests -q` 当前 33 个测试全部通过。收敛方案的单-seed GPU 对照见下方；它们只用于开发判断，尚不是最终性能结论。
 
+#### burst=1 / burst=4 单-seed 结果总览
+
+| workload | 对照模式 | V4 实际行为 | 可以支持的结论 |
+|---|---|---|---|
+| burst=1 | baseline/V1/V2/V3/V4 | waiting window 始终为空，prefetch 为 0 | V4 没有明显兼容性回退；不能评价 prefetch 收益 |
+| burst=4，完整五模式 | baseline/V1/V2/V3/V4 | 旧 planner 未接受 target，且旧 V4 改坏了 V3 安全窗口时机 | 只作为问题定位记录，不能评价当前 V4 性能 |
+| burst=4，收敛实现 | V3/V2+V3+V4 | 198 blocks prefetch 全部有用、无等待 | sync swapin 减少 187 blocks；延迟单 seed 呈混合波动 |
+| burst=4，解耦实现 | V2/V2+V4 | 198 blocks prefetch 全部有用、无等待 | sync swapin 减少 198 blocks；request latency 单 seed 全面改善 |
+
+burst=1 trace/output SHA256 分别为 `ffeec039577805ac6076a9cd8f05ab51d3ba6eaf7270c740569e17c6c7354f77` / `f1fd93319cc451261122235d8a2bf6770fec09f48355ce170347b7c464e8c89a`；burst=4 分别为 `ec63314dc4ad8a547591204bcb5608c71fed06b0b10a2224b7bec9db14344a6b` / `f1fd93319cc451261122235d8a2bf6770fec09f48355ce170347b7c464e8c89a`。所有正式对照的 paired trace、greedy output 和 CPU physical budget 校验均通过。
+
+目前没有“解耦后 V2/V2+V4 的 burst=1”数据。burst=1 表格来自解耦前的完整五模式实验；由于当时 V4 没有发生任何 prefetch，它只用于说明 smooth workload 下的兼容性，不能与解耦后的 burst=4 数据拼成 prefetch 性能趋势。若要比较 V2/V2+V4 在 burst=1 与 burst=4 下的差异，必须按当前代码补跑一次 burst=1。
+
 #### 旧版 V4 copy-path 功能验证（历史记录）
 
 - 当时 `.venv-fa28/bin/python -m unittest tests.test_benchmark_rigor -q` 的 26 个测试全部通过；覆盖 V4 policy 映射、旧 next-use victim 顺序、pending->resident slot 状态和完整请求容量限制。
@@ -153,7 +166,7 @@ Benchmark 模式映射为：`v2`=V2、`v3`=V2+V3、`v2_v4`=V2+V4、`v4`=V2+V3+V4
 - demand allocation 恢复 LRU 后，复用上述 8B smoke 的同一参数重跑：`trace_sha256`/`output_sha256` 与上述结果完全一致，replacement completed/useful/wasted 仍为 `1/1/0`，`scheduler_prefetch_wait_count=0`。改前/改后吞吐为 `8.674/8.680 req/s`，该小样本只说明没有明显回退，不作为性能结论。改后 `gpu_lru_evicted_gpu_only_block_count=1` 来自这次 targeted replacement，victim 已由同一 copy stream 的 D2H->H2D 保护，不是 demand allocation 直接覆盖。新结果保存在 `exp/v4_lru_demand_20260902/v4_after_matched.json`。
 - 这只是小容量、单次功能验证，不作为 V4 性能结论。正式结论仍需按主 hot/cold smooth/burst 配置做单-seed 开发对照，敲定参数后补至少 5 seeds。
 
-#### 旧版 V4 主配置 smooth 单-seed 对照（burst=1，历史记录）
+#### burst=1 完整五模式单-seed 对照（解耦前实现）
 
 使用 12-hot-doc 主 workload、seed 1、Poisson 2 req/s 和 `arrival-burst-size=1` 跑完 baseline/V1/V2/V3/V4。V1/V2 使用完整 eager CPU backing；V3/V4 均使用 40-block GPU safety window 和 15 GiB CPU cap。五个模式的 trace/output SHA256 完全一致，CPU physical budget 校验通过。
 
@@ -167,9 +180,9 @@ Benchmark 模式映射为：`v2`=V2、`v3`=V2+V3、`v2_v4`=V2+V4、`v4`=V2+V3+V4
 
 本轮 V4 的 `visible_request_count_max=0`，planned/completed/useful prefetch、targeted eviction/writeback 和 prefetch wait 全部为 0。原因是 smooth 低负载下，每次 demand admission 都能接走当时已到达的请求，V4 规划时 waiting queue 始终为空。因此 V4 实际退化为 V3 路径：median/p90 的表面改善以及 p99/recompute 的波动都不能归因于 lookahead。该结果只证明 V4 在原 smooth workload 下没有明显回退；要评价 V4 机制，下一步必须跑已约定的 `arrival-burst-size=4` 压力组。原始结果保存在 `exp/v4_main_smooth_run1_20260902_204335/`。
 
-#### 旧版 V4 主配置 burst=4 单-seed 对照（历史记录）
+#### burst=4 完整五模式单-seed 对照（旧实现诊断）
 
-保持主 workload 和 seed 1 不变，将 `arrival-burst-size` 改为 4；V3/V4 使用 80-block GPU safety window 和 19 GiB CPU cap。五个模式的 trace SHA256 均为 `ec63314d...`，output SHA256 均为 `f1fd9331...`，CPU physical budget 校验通过。
+保持主 workload 和 seed 1 不变，将 `arrival-burst-size` 改为 4；V3/V4 使用 80-block GPU safety window 和 19 GiB CPU cap。五个模式的 trace/output hash 与总览中的 burst=4 完整 hash 一致，CPU physical budget 校验通过。
 
 | mode | median req | p90 req | p99 req | median TTFT | p90 TTFT | prefill total | recompute tokens |
 |---|---:|---:|---:|---:|---:|---:|---:|
@@ -187,7 +200,7 @@ burst 确实产生了 V4 可见窗口：`visible_request_count_sum=250`、max `6
 
 #### 当前收敛版 V4 burst=4 单-seed 对照
 
-使用与旧 burst 主实验相同的 workload/trace，只跑 V3/V4、seed 1；GPU safety window 为 80 blocks，CPU hard cap 为 19 GiB。两者 trace SHA256 均为 `ec63314d...`，output SHA256 均为 `f1fd9331...`，物理 CPU budget 校验通过，末态 pending writeback/replacement 均为 0。
+使用与旧 burst 主实验相同的 workload/trace，只跑 V3/V4、seed 1；GPU safety window 为 80 blocks，CPU hard cap 为 19 GiB。两者 trace/output hash 与总览中的 burst=4 完整 hash 一致，物理 CPU budget 校验通过，末态 pending writeback/replacement 均为 0。
 
 | mode | median req | p90 req | p99 req | median TTFT | p90 TTFT | prefill total | recompute tokens | sync swapin blocks | GPU hits |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -200,7 +213,7 @@ V4 计划并完成 198 个 block prefetch，useful/wasted=`198/0`，同步等待
 
 #### 解耦后 V2 / V2+V4 burst=4 单-seed 对照
 
-使用上述相同 burst workload 和 seed 1，只跑 V2 与 V2+V4。两者都使用 V2 eager CPU backing，`cpu_prefix_cache_gb_limit=0`（unlimited）；V2+V4 没有开启 V3，所以 GPU watermark 和 CPU 19 GiB cap 均不适用。trace SHA256 均为 `ec63314d...`，output SHA256 均为 `f1fd9331...`，三项 benchmark 校验全部通过。
+使用上述相同 burst workload 和 seed 1，只跑 V2 与 V2+V4。两者都使用 V2 eager CPU backing，`cpu_prefix_cache_gb_limit=0`（unlimited）；V2+V4 没有开启 V3，所以 GPU watermark 和 CPU 19 GiB cap 均不适用。trace/output hash 与总览中的 burst=4 完整 hash 一致，三项 benchmark 校验全部通过。
 
 | mode | median req | p90 req | p99 req | median TTFT | p90 TTFT | p99 TTFT | prefill total | sync swapin blocks |
 |---|---:|---:|---:|---:|---:|---:|---:|---:|
@@ -491,6 +504,10 @@ exp/v3_cpu_gpuaware_8gb_20260902_153724/
 exp/v3_cpu_gpuaware_14gb_20260902_154300/
 exp/v3_cpu_gpuaware_15gb_20260902_154712/
 exp/v3_cpu_naive_boundary_20260902_160124/
+exp/v3_gpu_burst4_20260902_212151/
+exp/v3_gpu_burst4_fine_20260902_213510/
+exp/v3_cpu_burst4_w80_20260902_214848/
+exp/v3_cpu_burst4_w80_20260902_18gb/
 exp/v4_main_smooth_run1_20260902_204335/
 exp/v4_main_burst4_w80_cpu19_run1_20260902_221035/
 exp/v4_redesign_burst4_w80_cpu19_run1_20260903_1843/
@@ -498,4 +515,4 @@ exp/v4_prefetch_burst4_w80_cpu19_run1_20260903_1020/
 exp/v2_v2v4_burst4_unlimited_run1_20260903_103722/
 ```
 
-其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是原 V1/V2/V3 主实验分析入口；`v2_v2v4_burst4_unlimited_run1_20260903_103722/hot_cold_burst/summary.json` 是当前隔离 V4 预取效果的入口。GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；CPU 目录保留 GPU-aware 8/14/15/16 GiB sweep 与 Naive V3 18/19/20 GiB 边界数据。后续实验必须使用新的时间戳目录，不覆盖已有结果。
+其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是原 V1/V2/V3 主实验分析入口；`v4_main_smooth_run1_20260902_204335/hot_cold_sharing/summary.json` 是 burst=1 五模式入口；`v4_prefetch_burst4_w80_cpu19_run1_20260903_1020/hot_cold_burst/summary.json` 和 `v2_v2v4_burst4_unlimited_run1_20260903_103722/hot_cold_burst/summary.json` 分别是 burst=4 下叠加 V3 和隔离 V4 的当前入口。GPU/CPU watermark sweep 的 compact summary 和表格已纳入 Git；raw per-run JSON/log 保留在本地并由 `.gitignore` 排除。后续实验必须使用新的时间戳目录，不覆盖已有结果。
