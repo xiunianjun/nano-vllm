@@ -1,0 +1,5097 @@
+{
+  "case": "hot_cold_sharing",
+  "comparison": {
+    "decode_time_speedup_v1_over_baseline": 0.7349813625582504,
+    "decode_time_speedup_v1_over_baseline_paired": {
+      "ci95_high": 0.7349813625582504,
+      "ci95_low": 0.7349813625582504,
+      "max": 0.7349813625582504,
+      "mean": 0.7349813625582504,
+      "min": 0.7349813625582504,
+      "stdev": 0.0
+    },
+    "decode_time_speedup_v2_over_baseline": 0.7602373670343852,
+    "decode_time_speedup_v2_over_baseline_paired": {
+      "ci95_high": 0.7602373670343852,
+      "ci95_low": 0.7602373670343852,
+      "max": 0.7602373670343852,
+      "mean": 0.7602373670343852,
+      "min": 0.7602373670343852,
+      "stdev": 0.0
+    },
+    "decode_time_speedup_v2_over_v1": 1.0343627821911376,
+    "decode_time_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.0343627821911376,
+      "ci95_low": 1.0343627821911376,
+      "max": 1.0343627821911376,
+      "mean": 1.0343627821911376,
+      "min": 1.0343627821911376,
+      "stdev": 0.0
+    },
+    "decode_time_speedup_v3_over_v1": 1.0353151252946369,
+    "decode_time_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.0353151252946369,
+      "ci95_low": 1.0353151252946369,
+      "max": 1.0353151252946369,
+      "mean": 1.0353151252946369,
+      "min": 1.0353151252946369,
+      "stdev": 0.0
+    },
+    "decode_time_speedup_v3_over_v2": 1.0009207051141975,
+    "decode_time_speedup_v3_over_v2_paired": {
+      "ci95_high": 1.0009207051141975,
+      "ci95_low": 1.0009207051141975,
+      "max": 1.0009207051141975,
+      "mean": 1.0009207051141975,
+      "min": 1.0009207051141975,
+      "stdev": 0.0
+    },
+    "decode_time_speedup_v4_over_v3": 1.0457470550424834,
+    "decode_time_speedup_v4_over_v3_paired": {
+      "ci95_high": 1.0457470550424834,
+      "ci95_low": 1.0457470550424834,
+      "max": 1.0457470550424834,
+      "mean": 1.0457470550424834,
+      "min": 1.0457470550424834,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v1_over_baseline": 2.6977897421324952,
+    "prefill_time_speedup_v1_over_baseline_paired": {
+      "ci95_high": 2.6977897421324952,
+      "ci95_low": 2.6977897421324952,
+      "max": 2.6977897421324952,
+      "mean": 2.6977897421324952,
+      "min": 2.6977897421324952,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v2_over_baseline": 3.3495609255512653,
+    "prefill_time_speedup_v2_over_baseline_paired": {
+      "ci95_high": 3.3495609255512653,
+      "ci95_low": 3.3495609255512653,
+      "max": 3.3495609255512653,
+      "mean": 3.3495609255512653,
+      "min": 3.3495609255512653,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v2_over_v1": 1.241594507251544,
+    "prefill_time_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.241594507251544,
+      "ci95_low": 1.241594507251544,
+      "max": 1.241594507251544,
+      "mean": 1.241594507251544,
+      "min": 1.241594507251544,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v3_over_v1": 1.1086200874101668,
+    "prefill_time_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.1086200874101668,
+      "ci95_low": 1.1086200874101668,
+      "max": 1.1086200874101668,
+      "mean": 1.1086200874101668,
+      "min": 1.1086200874101668,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v3_over_v2": 0.892900283413998,
+    "prefill_time_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.892900283413998,
+      "ci95_low": 0.892900283413998,
+      "max": 0.892900283413998,
+      "mean": 0.892900283413998,
+      "min": 0.892900283413998,
+      "stdev": 0.0
+    },
+    "prefill_time_speedup_v4_over_v3": 1.0262942753245587,
+    "prefill_time_speedup_v4_over_v3_paired": {
+      "ci95_high": 1.0262942753245587,
+      "ci95_low": 1.0262942753245587,
+      "max": 1.0262942753245587,
+      "mean": 1.0262942753245587,
+      "min": 1.0262942753245587,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v1_over_baseline": 5.3861349639568985,
+    "queueing_avg_speedup_v1_over_baseline_paired": {
+      "ci95_high": 5.3861349639568985,
+      "ci95_low": 5.3861349639568985,
+      "max": 5.3861349639568985,
+      "mean": 5.3861349639568985,
+      "min": 5.3861349639568985,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v2_over_baseline": 8.4918809599374,
+    "queueing_avg_speedup_v2_over_baseline_paired": {
+      "ci95_high": 8.4918809599374,
+      "ci95_low": 8.4918809599374,
+      "max": 8.4918809599374,
+      "mean": 8.4918809599374,
+      "min": 8.4918809599374,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v2_over_v1": 1.5766186730862906,
+    "queueing_avg_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.5766186730862906,
+      "ci95_low": 1.5766186730862906,
+      "max": 1.5766186730862906,
+      "mean": 1.5766186730862906,
+      "min": 1.5766186730862906,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v3_over_v1": 1.2626210340903852,
+    "queueing_avg_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.2626210340903852,
+      "ci95_low": 1.2626210340903852,
+      "max": 1.2626210340903852,
+      "mean": 1.2626210340903852,
+      "min": 1.2626210340903852,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v3_over_v2": 0.8008411010499812,
+    "queueing_avg_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.8008411010499812,
+      "ci95_low": 0.8008411010499812,
+      "max": 0.8008411010499812,
+      "mean": 0.8008411010499812,
+      "min": 0.8008411010499812,
+      "stdev": 0.0
+    },
+    "queueing_avg_speedup_v4_over_v3": 1.1041601686015559,
+    "queueing_avg_speedup_v4_over_v3_paired": {
+      "ci95_high": 1.1041601686015559,
+      "ci95_low": 1.1041601686015559,
+      "max": 1.1041601686015559,
+      "mean": 1.1041601686015559,
+      "min": 1.1041601686015559,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v1_over_baseline": 10.33469317251454,
+    "queueing_p99_speedup_v1_over_baseline_paired": {
+      "ci95_high": 10.33469317251454,
+      "ci95_low": 10.33469317251454,
+      "max": 10.33469317251454,
+      "mean": 10.33469317251454,
+      "min": 10.33469317251454,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v2_over_baseline": 18.555989626601015,
+    "queueing_p99_speedup_v2_over_baseline_paired": {
+      "ci95_high": 18.555989626601015,
+      "ci95_low": 18.555989626601015,
+      "max": 18.555989626601015,
+      "mean": 18.555989626601015,
+      "min": 18.555989626601015,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v2_over_v1": 1.7955046479707097,
+    "queueing_p99_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.7955046479707097,
+      "ci95_low": 1.7955046479707097,
+      "max": 1.7955046479707097,
+      "mean": 1.7955046479707097,
+      "min": 1.7955046479707097,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v3_over_v1": 1.2040988900797827,
+    "queueing_p99_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.2040988900797827,
+      "ci95_low": 1.2040988900797827,
+      "max": 1.2040988900797827,
+      "mean": 1.2040988900797827,
+      "min": 1.2040988900797827,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v3_over_v2": 0.6706186427535359,
+    "queueing_p99_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.6706186427535359,
+      "ci95_low": 0.6706186427535359,
+      "max": 0.6706186427535359,
+      "mean": 0.6706186427535359,
+      "min": 0.6706186427535359,
+      "stdev": 0.0
+    },
+    "queueing_p99_speedup_v4_over_v3": 0.8143464247510098,
+    "queueing_p99_speedup_v4_over_v3_paired": {
+      "ci95_high": 0.8143464247510098,
+      "ci95_low": 0.8143464247510098,
+      "max": 0.8143464247510098,
+      "mean": 0.8143464247510098,
+      "min": 0.8143464247510098,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v1_over_baseline": 1.5115611232703878,
+    "request_latency_median_speedup_v1_over_baseline_paired": {
+      "ci95_high": 1.5115611232703878,
+      "ci95_low": 1.5115611232703878,
+      "max": 1.5115611232703878,
+      "mean": 1.5115611232703878,
+      "min": 1.5115611232703878,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v2_over_baseline": 1.6224984697443445,
+    "request_latency_median_speedup_v2_over_baseline_paired": {
+      "ci95_high": 1.6224984697443445,
+      "ci95_low": 1.6224984697443445,
+      "max": 1.6224984697443445,
+      "mean": 1.6224984697443445,
+      "min": 1.6224984697443445,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v2_over_v1": 1.0733925639963104,
+    "request_latency_median_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.0733925639963104,
+      "ci95_low": 1.0733925639963104,
+      "max": 1.0733925639963104,
+      "mean": 1.0733925639963104,
+      "min": 1.0733925639963104,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v3_over_v1": 1.0550948263600624,
+    "request_latency_median_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.0550948263600624,
+      "ci95_low": 1.0550948263600624,
+      "max": 1.0550948263600624,
+      "mean": 1.0550948263600624,
+      "min": 1.0550948263600624,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v3_over_v2": 0.9829533590505563,
+    "request_latency_median_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.9829533590505563,
+      "ci95_low": 0.9829533590505563,
+      "max": 0.9829533590505563,
+      "mean": 0.9829533590505563,
+      "min": 0.9829533590505563,
+      "stdev": 0.0
+    },
+    "request_latency_median_speedup_v4_over_v3": 1.0399660136200994,
+    "request_latency_median_speedup_v4_over_v3_paired": {
+      "ci95_high": 1.0399660136200994,
+      "ci95_low": 1.0399660136200994,
+      "max": 1.0399660136200994,
+      "mean": 1.0399660136200994,
+      "min": 1.0399660136200994,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v1_over_baseline": 1.8939924935933365,
+    "request_latency_p99_speedup_v1_over_baseline_paired": {
+      "ci95_high": 1.8939924935933365,
+      "ci95_low": 1.8939924935933365,
+      "max": 1.8939924935933365,
+      "mean": 1.8939924935933365,
+      "min": 1.8939924935933365,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v2_over_baseline": 3.2888895553435717,
+    "request_latency_p99_speedup_v2_over_baseline_paired": {
+      "ci95_high": 3.2888895553435717,
+      "ci95_low": 3.2888895553435717,
+      "max": 3.2888895553435717,
+      "mean": 3.2888895553435717,
+      "min": 3.2888895553435717,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v2_over_v1": 1.7364850000560441,
+    "request_latency_p99_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.7364850000560441,
+      "ci95_low": 1.7364850000560441,
+      "max": 1.7364850000560441,
+      "mean": 1.7364850000560441,
+      "min": 1.7364850000560441,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v3_over_v1": 1.2602783827780544,
+    "request_latency_p99_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.2602783827780544,
+      "ci95_low": 1.2602783827780544,
+      "max": 1.2602783827780544,
+      "mean": 1.2602783827780544,
+      "min": 1.2602783827780544,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v3_over_v2": 0.7257640479113725,
+    "request_latency_p99_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.7257640479113725,
+      "ci95_low": 0.7257640479113725,
+      "max": 0.7257640479113725,
+      "mean": 0.7257640479113725,
+      "min": 0.7257640479113725,
+      "stdev": 0.0
+    },
+    "request_latency_p99_speedup_v4_over_v3": 0.9724794625471811,
+    "request_latency_p99_speedup_v4_over_v3_paired": {
+      "ci95_high": 0.9724794625471811,
+      "ci95_low": 0.9724794625471811,
+      "max": 0.9724794625471811,
+      "mean": 0.9724794625471811,
+      "min": 0.9724794625471811,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v1_over_baseline": 3.6399281409721227,
+    "ttft_median_speedup_v1_over_baseline_paired": {
+      "ci95_high": 3.6399281409721227,
+      "ci95_low": 3.6399281409721227,
+      "max": 3.6399281409721227,
+      "mean": 3.6399281409721227,
+      "min": 3.6399281409721227,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v2_over_baseline": 4.138275242938748,
+    "ttft_median_speedup_v2_over_baseline_paired": {
+      "ci95_high": 4.138275242938748,
+      "ci95_low": 4.138275242938748,
+      "max": 4.138275242938748,
+      "mean": 4.138275242938748,
+      "min": 4.138275242938748,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v2_over_v1": 1.1369112473285066,
+    "ttft_median_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.1369112473285066,
+      "ci95_low": 1.1369112473285066,
+      "max": 1.1369112473285066,
+      "mean": 1.1369112473285066,
+      "min": 1.1369112473285066,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v3_over_v1": 1.105119768600747,
+    "ttft_median_speedup_v3_over_v1_paired": {
+      "ci95_high": 1.105119768600747,
+      "ci95_low": 1.105119768600747,
+      "max": 1.105119768600747,
+      "mean": 1.105119768600747,
+      "min": 1.105119768600747,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v3_over_v2": 0.9720369740360449,
+    "ttft_median_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.9720369740360449,
+      "ci95_low": 0.9720369740360449,
+      "max": 0.9720369740360449,
+      "mean": 0.9720369740360449,
+      "min": 0.9720369740360449,
+      "stdev": 0.0
+    },
+    "ttft_median_speedup_v4_over_v3": 1.0120776759759027,
+    "ttft_median_speedup_v4_over_v3_paired": {
+      "ci95_high": 1.0120776759759027,
+      "ci95_low": 1.0120776759759027,
+      "max": 1.0120776759759027,
+      "mean": 1.0120776759759027,
+      "min": 1.0120776759759027,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v1_over_baseline": 8.619156996019257,
+    "ttft_p99_speedup_v1_over_baseline_paired": {
+      "ci95_high": 8.619156996019257,
+      "ci95_low": 8.619156996019257,
+      "max": 8.619156996019257,
+      "mean": 8.619156996019257,
+      "min": 8.619156996019257,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v2_over_baseline": 13.200336286395796,
+    "ttft_p99_speedup_v2_over_baseline_paired": {
+      "ci95_high": 13.200336286395796,
+      "ci95_low": 13.200336286395796,
+      "max": 13.200336286395796,
+      "mean": 13.200336286395796,
+      "min": 13.200336286395796,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v2_over_v1": 1.531511294259096,
+    "ttft_p99_speedup_v2_over_v1_paired": {
+      "ci95_high": 1.531511294259096,
+      "ci95_low": 1.531511294259096,
+      "max": 1.531511294259096,
+      "mean": 1.531511294259096,
+      "min": 1.531511294259096,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v3_over_v1": 0.6406216634498465,
+    "ttft_p99_speedup_v3_over_v1_paired": {
+      "ci95_high": 0.6406216634498465,
+      "ci95_low": 0.6406216634498465,
+      "max": 0.6406216634498465,
+      "mean": 0.6406216634498465,
+      "min": 0.6406216634498465,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v3_over_v2": 0.41829378983441445,
+    "ttft_p99_speedup_v3_over_v2_paired": {
+      "ci95_high": 0.41829378983441445,
+      "ci95_low": 0.41829378983441445,
+      "max": 0.41829378983441445,
+      "mean": 0.41829378983441445,
+      "min": 0.41829378983441445,
+      "stdev": 0.0
+    },
+    "ttft_p99_speedup_v4_over_v3": 0.9414424898506291,
+    "ttft_p99_speedup_v4_over_v3_paired": {
+      "ci95_high": 0.9414424898506291,
+      "ci95_low": 0.9414424898506291,
+      "max": 0.9414424898506291,
+      "mean": 0.9414424898506291,
+      "min": 0.9414424898506291,
+      "stdev": 0.0
+    }
+  },
+  "modes": {
+    "baseline": {
+      "achieved_throughput": {
+        "ci95_high": 1.981730998687236,
+        "ci95_low": 1.981730998687236,
+        "max": 1.981730998687236,
+        "mean": 1.981730998687236,
+        "min": 1.981730998687236,
+        "stdev": 0.0
+      },
+      "arrival_mode": "poisson",
+      "cpu_prefix_cache_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_metadata_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_restored_token_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes_peak": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb_peak": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_exhausted_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_free_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb_requested": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_on_demand_alloc_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_gb": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reuse_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_used_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_writeback_rejected_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_restore_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_writeback_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_token_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "decode_step_count": {
+        "ci95_high": 1696.0,
+        "ci95_low": 1696.0,
+        "max": 1696,
+        "mean": 1696.0,
+        "min": 1696,
+        "stdev": 0.0
+      },
+      "decode_step_time_avg_sec": {
+        "ci95_high": 0.02813441966227058,
+        "ci95_low": 0.02813441966227058,
+        "max": 0.02813441966227058,
+        "mean": 0.02813441966227058,
+        "min": 0.02813441966227058,
+        "stdev": 0.0
+      },
+      "decode_step_time_sec": {
+        "ci95_high": 47.715975747210905,
+        "ci95_low": 47.715975747210905,
+        "max": 47.715975747210905,
+        "mean": 47.715975747210905,
+        "min": 47.715975747210905,
+        "stdev": 0.0
+      },
+      "decode_step_time_total_sec": {
+        "ci95_high": 47.715975747210905,
+        "ci95_low": 47.715975747210905,
+        "max": 47.715975747210905,
+        "mean": 47.715975747210905,
+        "min": 47.715975747210905,
+        "stdev": 0.0
+      },
+      "decode_timed_tokens": {
+        "ci95_high": 3804.0,
+        "ci95_low": 3804.0,
+        "max": 3804,
+        "mean": 3804.0,
+        "min": 3804,
+        "stdev": 0.0
+      },
+      "document_recomputed_tokens_est": {
+        "ci95_high": 1238528.0,
+        "ci95_low": 1238528.0,
+        "max": 1238528,
+        "mean": 1238528.0,
+        "min": 1238528,
+        "stdev": 0.0
+      },
+      "gpu_kv_cache_gb_actual": 7.98046875,
+      "gpu_lru_cached_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "gpu_lru_cached_block_peak": {
+        "ci95_high": 226.0,
+        "ci95_low": 226.0,
+        "max": 226,
+        "mean": 226.0,
+        "min": 226,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_cpu_backed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_gpu_only_block_count": {
+        "ci95_high": 4837.0,
+        "ci95_low": 4837.0,
+        "max": 4837,
+        "mean": 4837.0,
+        "min": 4837,
+        "stdev": 0.0
+      },
+      "gpu_lru_eviction_count": {
+        "ci95_high": 4837.0,
+        "ci95_low": 4837.0,
+        "max": 4837,
+        "mean": 4837.0,
+        "min": 4837,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_block_count": {
+        "ci95_high": 2426.0,
+        "ci95_low": 2426.0,
+        "max": 2426,
+        "mean": 2426.0,
+        "min": 2426,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_token_count": {
+        "ci95_high": 621056.0,
+        "ci95_low": 621056.0,
+        "max": 621056,
+        "mean": 621056.0,
+        "min": 621056,
+        "stdev": 0.0
+      },
+      "gpu_prefix_miss_request_count": {
+        "ci95_high": 156.0,
+        "ci95_low": 156.0,
+        "max": 156,
+        "mean": 156.0,
+        "min": 156,
+        "stdev": 0.0
+      },
+      "inactive_cpu_backed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_gpu_only_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "inactive_pending_writeback_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_safe_or_pending_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_scheduled_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_target_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "max_num_batched_tokens": {
+        "ci95_high": 33152.0,
+        "ci95_low": 33152.0,
+        "max": 33152,
+        "mean": 33152.0,
+        "min": 33152,
+        "stdev": 0.0
+      },
+      "max_num_seqs": {
+        "ci95_high": 8.0,
+        "ci95_low": 8.0,
+        "max": 8,
+        "mean": 8.0,
+        "min": 8,
+        "stdev": 0.0
+      },
+      "measured_workload_profile": {
+        "access_counts": {
+          "0": 10,
+          "1": 18,
+          "10": 13,
+          "11": 23,
+          "12": 6,
+          "13": 10,
+          "14": 9,
+          "15": 9,
+          "16": 15,
+          "17": 9,
+          "2": 14,
+          "3": 12,
+          "4": 20,
+          "5": 19,
+          "6": 16,
+          "7": 15,
+          "8": 16,
+          "9": 18
+        },
+        "realized_working_set_gb": 20.25,
+        "realized_working_set_tokens": 147456,
+        "request_count": 252,
+        "reuse_distance": {
+          "avg": 7.816239316239316,
+          "count": 234,
+          "max": 17,
+          "median": 8.0,
+          "min": 0,
+          "p90": 15.0,
+          "p99": 17.0
+        },
+        "unique_document_count": 18,
+        "working_set_to_gpu_kv_ratio": 2.537444933920705
+      },
+      "model_runner_call_time_sec": {
+        "ci95_high": 88.59744630660862,
+        "ci95_low": 88.59744630660862,
+        "max": 88.59744630660862,
+        "mean": 88.59744630660862,
+        "min": 88.59744630660862,
+        "stdev": 0.0
+      },
+      "num_documents": 18,
+      "offered_rate_realized": {
+        "ci95_high": 1.9824949257090796,
+        "ci95_low": 1.9824949257090796,
+        "max": 1.9824949257090796,
+        "mean": 1.9824949257090796,
+        "min": 1.9824949257090796,
+        "stdev": 0.0
+      },
+      "planned_arrival_span_sec": {
+        "ci95_high": 126.6081424698854,
+        "ci95_low": 126.6081424698854,
+        "max": 126.6081424698854,
+        "mean": 126.6081424698854,
+        "min": 126.6081424698854,
+        "stdev": 0.0
+      },
+      "postprocess_time_sec": {
+        "ci95_high": 0.08176797477062792,
+        "ci95_low": 0.08176797477062792,
+        "max": 0.08176797477062792,
+        "mean": 0.08176797477062792,
+        "min": 0.08176797477062792,
+        "stdev": 0.0
+      },
+      "prefill_model_cuda_sec": {
+        "ci95_high": 40.56566914558411,
+        "ci95_low": 40.56566914558411,
+        "max": 40.56566914558411,
+        "mean": 40.56566914558411,
+        "min": 40.56566914558411,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_count": {
+        "ci95_high": 219.0,
+        "ci95_low": 219.0,
+        "max": 219,
+        "mean": 219.0,
+        "min": 219,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_wall_sec": {
+        "ci95_high": 40.932345795677975,
+        "ci95_low": 40.932345795677975,
+        "max": 40.932345795677975,
+        "mean": 40.932345795677975,
+        "min": 40.932345795677975,
+        "stdev": 0.0
+      },
+      "prefill_prepare_wall_sec": {
+        "ci95_high": 0.30070658144541085,
+        "ci95_low": 0.30070658144541085,
+        "max": 0.30070658144541085,
+        "mean": 0.30070658144541085,
+        "min": 0.30070658144541085,
+        "stdev": 0.0
+      },
+      "prefill_sample_prepare_wall_sec": {
+        "ci95_high": 0.006291739293374121,
+        "ci95_low": 0.006291739293374121,
+        "max": 0.006291739293374121,
+        "mean": 0.006291739293374121,
+        "min": 0.006291739293374121,
+        "stdev": 0.0
+      },
+      "prefill_sampler_wall_sec": {
+        "ci95_high": 33.46593149204273,
+        "ci95_low": 33.46593149204273,
+        "max": 33.46593149204273,
+        "mean": 33.46593149204273,
+        "min": 33.46593149204273,
+        "stdev": 0.0
+      },
+      "prefill_step_time_avg_sec": {
+        "ci95_high": 0.18810225672090689,
+        "ci95_low": 0.18810225672090689,
+        "max": 0.18810225672090689,
+        "mean": 0.18810225672090689,
+        "min": 0.18810225672090689,
+        "stdev": 0.0
+      },
+      "prefill_step_time_sec": {
+        "ci95_high": 41.19439422187861,
+        "ci95_low": 41.19439422187861,
+        "max": 41.19439422187861,
+        "mean": 41.19439422187861,
+        "min": 41.19439422187861,
+        "stdev": 0.0
+      },
+      "prefill_step_time_total_sec": {
+        "ci95_high": 41.19439422187861,
+        "ci95_low": 41.19439422187861,
+        "max": 41.19439422187861,
+        "mean": 41.19439422187861,
+        "min": 41.19439422187861,
+        "stdev": 0.0
+      },
+      "prefill_timed_tok_per_sec": {
+        "ci95_high": 30652.71437659256,
+        "ci95_low": 30652.71437659256,
+        "max": 30652.71437659256,
+        "mean": 30652.71437659256,
+        "min": 30652.71437659256,
+        "stdev": 0.0
+      },
+      "prefill_token_count": {
+        "ci95_high": 1262720.0,
+        "ci95_low": 1262720.0,
+        "max": 1262720,
+        "mean": 1262720.0,
+        "min": 1262720,
+        "stdev": 0.0
+      },
+      "prefix_cache_reused_token_count": {
+        "ci95_high": 825856.0,
+        "ci95_low": 825856.0,
+        "max": 825856,
+        "mean": 825856.0,
+        "min": 825856,
+        "stdev": 0.0
+      },
+      "query_elapsed_sec": {
+        "ci95_high": 127.16155732888728,
+        "ci95_low": 127.16155732888728,
+        "max": 127.16155732888728,
+        "mean": 127.16155732888728,
+        "min": 127.16155732888728,
+        "stdev": 0.0
+      },
+      "query_requests": 252,
+      "queueing_latency_avg": {
+        "ci95_high": 0.0846367310478522,
+        "ci95_low": 0.0846367310478522,
+        "max": 0.0846367310478522,
+        "mean": 0.0846367310478522,
+        "min": 0.0846367310478522,
+        "stdev": 0.0
+      },
+      "queueing_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "queueing_latency_max": {
+        "ci95_high": 1.1506521272240207,
+        "ci95_low": 1.1506521272240207,
+        "max": 1.1506521272240207,
+        "mean": 1.1506521272240207,
+        "min": 1.1506521272240207,
+        "stdev": 0.0
+      },
+      "queueing_latency_median": {
+        "ci95_high": 0.01735838025342673,
+        "ci95_low": 0.01735838025342673,
+        "max": 0.01735838025342673,
+        "mean": 0.01735838025342673,
+        "min": 0.01735838025342673,
+        "stdev": 0.0
+      },
+      "queueing_latency_min": {
+        "ci95_high": 0.00011975655797868967,
+        "ci95_low": 0.00011975655797868967,
+        "max": 0.00011975655797868967,
+        "mean": 0.00011975655797868967,
+        "min": 0.00011975655797868967,
+        "stdev": 0.0
+      },
+      "queueing_latency_p90": {
+        "ci95_high": 0.22667906088754539,
+        "ci95_low": 0.22667906088754539,
+        "max": 0.22667906088754539,
+        "mean": 0.22667906088754539,
+        "min": 0.22667906088754539,
+        "stdev": 0.0
+      },
+      "queueing_latency_p99": {
+        "ci95_high": 0.8244731301360307,
+        "ci95_low": 0.8244731301360307,
+        "max": 0.8244731301360307,
+        "mean": 0.8244731301360307,
+        "min": 0.8244731301360307,
+        "stdev": 0.0
+      },
+      "request_latency_avg": {
+        "ci95_high": 0.9832750036651897,
+        "ci95_low": 0.9832750036651897,
+        "max": 0.9832750036651897,
+        "mean": 0.9832750036651897,
+        "min": 0.9832750036651897,
+        "stdev": 0.0
+      },
+      "request_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "request_latency_max": {
+        "ci95_high": 2.847149315639399,
+        "ci95_low": 2.847149315639399,
+        "max": 2.847149315639399,
+        "mean": 2.847149315639399,
+        "min": 2.847149315639399,
+        "stdev": 0.0
+      },
+      "request_latency_median": {
+        "ci95_high": 0.8586078558000736,
+        "ci95_low": 0.8586078558000736,
+        "max": 0.8586078558000736,
+        "mean": 0.8586078558000736,
+        "min": 0.8586078558000736,
+        "stdev": 0.0
+      },
+      "request_latency_min": {
+        "ci95_high": 0.43752206931822,
+        "ci95_low": 0.43752206931822,
+        "max": 0.43752206931822,
+        "mean": 0.43752206931822,
+        "min": 0.43752206931822,
+        "stdev": 0.0
+      },
+      "request_latency_p90": {
+        "ci95_high": 1.6573703357600607,
+        "ci95_low": 1.6573703357600607,
+        "max": 1.6573703357600607,
+        "mean": 1.6573703357600607,
+        "min": 1.6573703357600607,
+        "stdev": 0.0
+      },
+      "request_latency_p99": {
+        "ci95_high": 2.332708806565499,
+        "ci95_low": 2.332708806565499,
+        "max": 2.332708806565499,
+        "mean": 2.332708806565499,
+        "min": 2.332708806565499,
+        "stdev": 0.0
+      },
+      "request_rate_target": 2.0,
+      "reusable_prefix_length": 8192,
+      "run_ids": [
+        1
+      ],
+      "runs": 1,
+      "safe_allocatable_block_count": {
+        "ci95_high": 3.0,
+        "ci95_low": 3.0,
+        "max": 3,
+        "mean": 3.0,
+        "min": 3,
+        "stdev": 0.0
+      },
+      "schedule_time_sec": {
+        "ci95_high": 0.21358907397370785,
+        "ci95_low": 0.21358907397370785,
+        "max": 0.21358907397370785,
+        "mean": 0.21358907397370785,
+        "min": 0.21358907397370785,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_writeback_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_useful_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_wall_sec": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wasted_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_future_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_no_visible_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_visible_request_count_max": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "single_prompt_fit_count_est": {
+        "ci95_high": 6.0,
+        "ci95_low": 6.0,
+        "max": 6,
+        "mean": 6.0,
+        "min": 6,
+        "stdev": 0.0
+      },
+      "single_prompt_kv_gb_est": {
+        "ci95_high": 1.140380859375,
+        "ci95_low": 1.140380859375,
+        "max": 1.140380859375,
+        "mean": 1.140380859375,
+        "min": 1.140380859375,
+        "stdev": 0.0
+      },
+      "single_prompt_to_gpu_kv_ratio": {
+        "ci95_high": 0.1428964757709251,
+        "ci95_low": 0.1428964757709251,
+        "max": 0.1428964757709251,
+        "mean": 0.1428964757709251,
+        "min": 0.1428964757709251,
+        "stdev": 0.0
+      },
+      "temperature": 0.0,
+      "ttft_latency_avg": {
+        "ci95_high": 0.3103305597855185,
+        "ci95_low": 0.3103305597855185,
+        "max": 0.3103305597855185,
+        "mean": 0.3103305597855185,
+        "min": 0.3103305597855185,
+        "stdev": 0.0
+      },
+      "ttft_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "ttft_latency_max": {
+        "ci95_high": 1.6896273732418194,
+        "ci95_low": 1.6896273732418194,
+        "max": 1.6896273732418194,
+        "mean": 1.6896273732418194,
+        "min": 1.6896273732418194,
+        "stdev": 0.0
+      },
+      "ttft_latency_median": {
+        "ci95_high": 0.2529578324756585,
+        "ci95_low": 0.2529578324756585,
+        "max": 0.2529578324756585,
+        "mean": 0.2529578324756585,
+        "min": 0.2529578324756585,
+        "stdev": 0.0
+      },
+      "ttft_latency_min": {
+        "ci95_high": 0.03405824722722173,
+        "ci95_low": 0.03405824722722173,
+        "max": 0.03405824722722173,
+        "mean": 0.03405824722722173,
+        "min": 0.03405824722722173,
+        "stdev": 0.0
+      },
+      "ttft_latency_p90": {
+        "ci95_high": 0.7313379079219885,
+        "ci95_low": 0.7313379079219885,
+        "max": 0.7313379079219885,
+        "mean": 0.7313379079219885,
+        "min": 0.7313379079219885,
+        "stdev": 0.0
+      },
+      "ttft_latency_p99": {
+        "ci95_high": 1.4906739884358844,
+        "ci95_low": 1.4906739884358844,
+        "max": 1.4906739884358844,
+        "mean": 1.4906739884358844,
+        "min": 1.4906739884358844,
+        "stdev": 0.0
+      },
+      "warmup_inflight_at_measurement_start": {
+        "ci95_high": 3.0,
+        "ci95_low": 3.0,
+        "max": 3,
+        "mean": 3.0,
+        "min": 3,
+        "stdev": 0.0
+      },
+      "working_set_gb_actual": 20.25,
+      "working_set_to_gpu_kv_ratio": {
+        "ci95_high": 2.537444933920705,
+        "ci95_low": 2.537444933920705,
+        "max": 2.537444933920705,
+        "mean": 2.537444933920705,
+        "min": 2.537444933920705,
+        "stdev": 0.0
+      }
+    },
+    "v1": {
+      "achieved_throughput": {
+        "ci95_high": 1.9825597431300956,
+        "ci95_low": 1.9825597431300956,
+        "max": 1.9825597431300956,
+        "mean": 1.9825597431300956,
+        "min": 1.9825597431300956,
+        "stdev": 0.0
+      },
+      "arrival_mode": "poisson",
+      "cpu_prefix_cache_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_metadata_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_restored_token_count": {
+        "ci95_high": 1908736.0,
+        "ci95_low": 1908736.0,
+        "max": 1908736,
+        "mean": 1908736.0,
+        "min": 1908736,
+        "stdev": 0.0
+      },
+      "cpu_prefix_d2h_bytes": {
+        "ci95_high": 1207959552.0,
+        "ci95_low": 1207959552.0,
+        "max": 1207959552,
+        "mean": 1207959552.0,
+        "min": 1207959552,
+        "stdev": 0.0
+      },
+      "cpu_prefix_h2d_bytes": {
+        "ci95_high": 281454575616.0,
+        "ci95_low": 281454575616.0,
+        "max": 281454575616,
+        "mean": 281454575616.0,
+        "min": 281454575616,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes": {
+        "ci95_high": 21743271936.0,
+        "ci95_low": 21743271936.0,
+        "max": 21743271936,
+        "mean": 21743271936.0,
+        "min": 21743271936,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes_peak": {
+        "ci95_high": 21743271936.0,
+        "ci95_low": 21743271936.0,
+        "max": 21743271936,
+        "mean": 21743271936.0,
+        "min": 21743271936,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb_peak": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_exhausted_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_free_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb_requested": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_on_demand_alloc_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reuse_count": {
+        "ci95_high": 32.0,
+        "ci95_low": 32.0,
+        "max": 32,
+        "mean": 32.0,
+        "min": 32,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_used_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_writeback_rejected_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_restore_latency_sum": {
+        "ci95_high": 5.644391557693484,
+        "ci95_low": 5.644391557693484,
+        "max": 5.644391557693484,
+        "mean": 5.644391557693484,
+        "min": 5.644391557693484,
+        "stdev": 0.0
+      },
+      "cpu_prefix_writeback_latency_sum": {
+        "ci95_high": 0.04018198394775391,
+        "ci95_low": 0.04018198394775391,
+        "max": 0.04018198394775391,
+        "mean": 0.04018198394775391,
+        "min": 0.04018198394775391,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_block_count": {
+        "ci95_high": 7456.0,
+        "ci95_low": 7456.0,
+        "max": 7456,
+        "mean": 7456.0,
+        "min": 7456,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_request_count": {
+        "ci95_high": 233.0,
+        "ci95_low": 233.0,
+        "max": 233,
+        "mean": 233.0,
+        "min": 233,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_token_count": {
+        "ci95_high": 1908736.0,
+        "ci95_low": 1908736.0,
+        "max": 1908736,
+        "mean": 1908736.0,
+        "min": 1908736,
+        "stdev": 0.0
+      },
+      "decode_step_count": {
+        "ci95_high": 2088.0,
+        "ci95_low": 2088.0,
+        "max": 2088,
+        "mean": 2088.0,
+        "min": 2088,
+        "stdev": 0.0
+      },
+      "decode_step_time_avg_sec": {
+        "ci95_high": 0.031092596316446508,
+        "ci95_low": 0.031092596316446508,
+        "max": 0.031092596316446508,
+        "mean": 0.031092596316446508,
+        "min": 0.031092596316446508,
+        "stdev": 0.0
+      },
+      "decode_step_time_sec": {
+        "ci95_high": 64.92134110874031,
+        "ci95_low": 64.92134110874031,
+        "max": 64.92134110874031,
+        "mean": 64.92134110874031,
+        "min": 64.92134110874031,
+        "stdev": 0.0
+      },
+      "decode_step_time_total_sec": {
+        "ci95_high": 64.92134110874031,
+        "ci95_low": 64.92134110874031,
+        "max": 64.92134110874031,
+        "mean": 64.92134110874031,
+        "min": 64.92134110874031,
+        "stdev": 0.0
+      },
+      "decode_timed_tokens": {
+        "ci95_high": 3794.0,
+        "ci95_low": 3794.0,
+        "max": 3794,
+        "mean": 3794.0,
+        "min": 3794,
+        "stdev": 0.0
+      },
+      "document_recomputed_tokens_est": {
+        "ci95_high": 8192.0,
+        "ci95_low": 8192.0,
+        "max": 8192,
+        "mean": 8192.0,
+        "min": 8192,
+        "stdev": 0.0
+      },
+      "gpu_kv_cache_gb_actual": 7.98046875,
+      "gpu_lru_cached_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_cached_block_peak": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_cpu_backed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_gpu_only_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_token_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_prefix_miss_request_count": {
+        "ci95_high": 234.0,
+        "ci95_low": 234.0,
+        "max": 234,
+        "mean": 234.0,
+        "min": 234,
+        "stdev": 0.0
+      },
+      "inactive_cpu_backed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_gpu_only_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_pending_writeback_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_safe_or_pending_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_scheduled_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_target_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "max_num_batched_tokens": {
+        "ci95_high": 33152.0,
+        "ci95_low": 33152.0,
+        "max": 33152,
+        "mean": 33152.0,
+        "min": 33152,
+        "stdev": 0.0
+      },
+      "max_num_seqs": {
+        "ci95_high": 8.0,
+        "ci95_low": 8.0,
+        "max": 8,
+        "mean": 8.0,
+        "min": 8,
+        "stdev": 0.0
+      },
+      "measured_workload_profile": {
+        "access_counts": {
+          "0": 10,
+          "1": 18,
+          "10": 13,
+          "11": 23,
+          "12": 6,
+          "13": 10,
+          "14": 9,
+          "15": 9,
+          "16": 15,
+          "17": 9,
+          "2": 14,
+          "3": 12,
+          "4": 20,
+          "5": 19,
+          "6": 16,
+          "7": 15,
+          "8": 16,
+          "9": 18
+        },
+        "realized_working_set_gb": 20.25,
+        "realized_working_set_tokens": 147456,
+        "request_count": 252,
+        "reuse_distance": {
+          "avg": 7.816239316239316,
+          "count": 234,
+          "max": 17,
+          "median": 8.0,
+          "min": 0,
+          "p90": 15.0,
+          "p99": 17.0
+        },
+        "unique_document_count": 18,
+        "working_set_to_gpu_kv_ratio": 2.537444933920705
+      },
+      "model_runner_call_time_sec": {
+        "ci95_high": 74.17178480722941,
+        "ci95_low": 74.17178480722941,
+        "max": 74.17178480722941,
+        "mean": 74.17178480722941,
+        "min": 74.17178480722941,
+        "stdev": 0.0
+      },
+      "num_documents": 18,
+      "offered_rate_realized": {
+        "ci95_high": 1.9824949257090796,
+        "ci95_low": 1.9824949257090796,
+        "max": 1.9824949257090796,
+        "mean": 1.9824949257090796,
+        "min": 1.9824949257090796,
+        "stdev": 0.0
+      },
+      "planned_arrival_span_sec": {
+        "ci95_high": 126.6081424698854,
+        "ci95_low": 126.6081424698854,
+        "max": 126.6081424698854,
+        "mean": 126.6081424698854,
+        "min": 126.6081424698854,
+        "stdev": 0.0
+      },
+      "postprocess_time_sec": {
+        "ci95_high": 0.050445591448806226,
+        "ci95_low": 0.050445591448806226,
+        "max": 0.050445591448806226,
+        "mean": 0.050445591448806226,
+        "min": 0.050445591448806226,
+        "stdev": 0.0
+      },
+      "prefill_model_cuda_sec": {
+        "ci95_high": 9.197551513671876,
+        "ci95_low": 9.197551513671876,
+        "max": 9.197551513671876,
+        "mean": 9.197551513671876,
+        "min": 9.197551513671876,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_count": {
+        "ci95_high": 245.0,
+        "ci95_low": 245.0,
+        "max": 245,
+        "mean": 245.0,
+        "min": 245,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_wall_sec": {
+        "ci95_high": 9.318537057144567,
+        "ci95_low": 9.318537057144567,
+        "max": 9.318537057144567,
+        "mean": 9.318537057144567,
+        "min": 9.318537057144567,
+        "stdev": 0.0
+      },
+      "prefill_prepare_wall_sec": {
+        "ci95_high": 0.05375274538528174,
+        "ci95_low": 0.05375274538528174,
+        "max": 0.05375274538528174,
+        "mean": 0.05375274538528174,
+        "min": 0.05375274538528174,
+        "stdev": 0.0
+      },
+      "prefill_sample_prepare_wall_sec": {
+        "ci95_high": 0.006234893808141351,
+        "ci95_low": 0.006234893808141351,
+        "max": 0.006234893808141351,
+        "mean": 0.006234893808141351,
+        "min": 0.006234893808141351,
+        "stdev": 0.0
+      },
+      "prefill_sampler_wall_sec": {
+        "ci95_high": 0.3258500638185069,
+        "ci95_low": 0.3258500638185069,
+        "max": 0.3258500638185069,
+        "mean": 0.3258500638185069,
+        "min": 0.3258500638185069,
+        "stdev": 0.0
+      },
+      "prefill_step_time_avg_sec": {
+        "ci95_high": 0.06232523682375191,
+        "ci95_low": 0.06232523682375191,
+        "max": 0.06232523682375191,
+        "mean": 0.06232523682375191,
+        "min": 0.06232523682375191,
+        "stdev": 0.0
+      },
+      "prefill_step_time_sec": {
+        "ci95_high": 15.269683021819219,
+        "ci95_low": 15.269683021819219,
+        "max": 15.269683021819219,
+        "mean": 15.269683021819219,
+        "min": 15.269683021819219,
+        "stdev": 0.0
+      },
+      "prefill_step_time_total_sec": {
+        "ci95_high": 15.269683021819219,
+        "ci95_low": 15.269683021819219,
+        "max": 15.269683021819219,
+        "mean": 15.269683021819219,
+        "min": 15.269683021819219,
+        "stdev": 0.0
+      },
+      "prefill_timed_tok_per_sec": {
+        "ci95_high": 2120.8036835948537,
+        "ci95_low": 2120.8036835948537,
+        "max": 2120.8036835948537,
+        "mean": 2120.8036835948537,
+        "min": 2120.8036835948537,
+        "stdev": 0.0
+      },
+      "prefill_token_count": {
+        "ci95_high": 32384.0,
+        "ci95_low": 32384.0,
+        "max": 32384,
+        "mean": 32384.0,
+        "min": 32384,
+        "stdev": 0.0
+      },
+      "prefix_cache_reused_token_count": {
+        "ci95_high": 147456.0,
+        "ci95_low": 147456.0,
+        "max": 147456,
+        "mean": 147456.0,
+        "min": 147456,
+        "stdev": 0.0
+      },
+      "query_elapsed_sec": {
+        "ci95_high": 127.10840158700012,
+        "ci95_low": 127.10840158700012,
+        "max": 127.10840158700012,
+        "mean": 127.10840158700012,
+        "min": 127.10840158700012,
+        "stdev": 0.0
+      },
+      "query_requests": 252,
+      "queueing_latency_avg": {
+        "ci95_high": 0.015713815493712438,
+        "ci95_low": 0.015713815493712438,
+        "max": 0.015713815493712438,
+        "mean": 0.015713815493712438,
+        "min": 0.015713815493712438,
+        "stdev": 0.0
+      },
+      "queueing_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "queueing_latency_max": {
+        "ci95_high": 0.484735329519026,
+        "ci95_low": 0.484735329519026,
+        "max": 0.484735329519026,
+        "mean": 0.484735329519026,
+        "min": 0.484735329519026,
+        "stdev": 0.0
+      },
+      "queueing_latency_median": {
+        "ci95_high": 0.007570167363155633,
+        "ci95_low": 0.007570167363155633,
+        "max": 0.007570167363155633,
+        "mean": 0.007570167363155633,
+        "min": 0.007570167363155633,
+        "stdev": 0.0
+      },
+      "queueing_latency_min": {
+        "ci95_high": 7.200415711849928e-05,
+        "ci95_low": 7.200415711849928e-05,
+        "max": 7.200415711849928e-05,
+        "mean": 7.200415711849928e-05,
+        "min": 7.200415711849928e-05,
+        "stdev": 0.0
+      },
+      "queueing_latency_p90": {
+        "ci95_high": 0.03786832777550444,
+        "ci95_low": 0.03786832777550444,
+        "max": 0.03786832777550444,
+        "mean": 0.03786832777550444,
+        "min": 0.03786832777550444,
+        "stdev": 0.0
+      },
+      "queueing_latency_p99": {
+        "ci95_high": 0.0797772238007747,
+        "ci95_low": 0.0797772238007747,
+        "max": 0.0797772238007747,
+        "mean": 0.0797772238007747,
+        "min": 0.0797772238007747,
+        "stdev": 0.0
+      },
+      "request_latency_avg": {
+        "ci95_high": 0.6293364138802557,
+        "ci95_low": 0.6293364138802557,
+        "max": 0.6293364138802557,
+        "mean": 0.6293364138802557,
+        "min": 0.6293364138802557,
+        "stdev": 0.0
+      },
+      "request_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "request_latency_max": {
+        "ci95_high": 1.2892650889698416,
+        "ci95_low": 1.2892650889698416,
+        "max": 1.2892650889698416,
+        "mean": 1.2892650889698416,
+        "min": 1.2892650889698416,
+        "stdev": 0.0
+      },
+      "request_latency_median": {
+        "ci95_high": 0.5680272154277191,
+        "ci95_low": 0.5680272154277191,
+        "max": 0.5680272154277191,
+        "mean": 0.5680272154277191,
+        "min": 0.5680272154277191,
+        "stdev": 0.0
+      },
+      "request_latency_min": {
+        "ci95_high": 0.46499048511032015,
+        "ci95_low": 0.46499048511032015,
+        "max": 0.46499048511032015,
+        "mean": 0.46499048511032015,
+        "min": 0.46499048511032015,
+        "stdev": 0.0
+      },
+      "request_latency_p90": {
+        "ci95_high": 0.8863598001771607,
+        "ci95_low": 0.8863598001771607,
+        "max": 0.8863598001771607,
+        "mean": 0.8863598001771607,
+        "min": 0.8863598001771607,
+        "stdev": 0.0
+      },
+      "request_latency_p99": {
+        "ci95_high": 1.2316357189673004,
+        "ci95_low": 1.2316357189673004,
+        "max": 1.2316357189673004,
+        "mean": 1.2316357189673004,
+        "min": 1.2316357189673004,
+        "stdev": 0.0
+      },
+      "request_rate_target": 2.0,
+      "reusable_prefix_length": 8192,
+      "run_ids": [
+        1
+      ],
+      "runs": 1,
+      "safe_allocatable_block_count": {
+        "ci95_high": 227.0,
+        "ci95_low": 227.0,
+        "max": 227,
+        "mean": 227.0,
+        "min": 227,
+        "stdev": 0.0
+      },
+      "schedule_time_sec": {
+        "ci95_high": 5.949077135301195,
+        "ci95_low": 5.949077135301195,
+        "max": 5.949077135301195,
+        "mean": 5.949077135301195,
+        "min": 5.949077135301195,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_writeback_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_useful_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_wall_sec": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wasted_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_future_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_no_visible_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_visible_request_count_max": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "single_prompt_fit_count_est": {
+        "ci95_high": 6.0,
+        "ci95_low": 6.0,
+        "max": 6,
+        "mean": 6.0,
+        "min": 6,
+        "stdev": 0.0
+      },
+      "single_prompt_kv_gb_est": {
+        "ci95_high": 1.140380859375,
+        "ci95_low": 1.140380859375,
+        "max": 1.140380859375,
+        "mean": 1.140380859375,
+        "min": 1.140380859375,
+        "stdev": 0.0
+      },
+      "single_prompt_to_gpu_kv_ratio": {
+        "ci95_high": 0.1428964757709251,
+        "ci95_low": 0.1428964757709251,
+        "max": 0.1428964757709251,
+        "mean": 0.1428964757709251,
+        "min": 0.1428964757709251,
+        "stdev": 0.0
+      },
+      "temperature": 0.0,
+      "ttft_latency_avg": {
+        "ci95_high": 0.07855749380264786,
+        "ci95_low": 0.07855749380264786,
+        "max": 0.07855749380264786,
+        "mean": 0.07855749380264786,
+        "min": 0.07855749380264786,
+        "stdev": 0.0
+      },
+      "ttft_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "ttft_latency_max": {
+        "ci95_high": 0.5441439144778997,
+        "ci95_low": 0.5441439144778997,
+        "max": 0.5441439144778997,
+        "mean": 0.5441439144778997,
+        "min": 0.5441439144778997,
+        "stdev": 0.0
+      },
+      "ttft_latency_median": {
+        "ci95_high": 0.06949528196128085,
+        "ci95_low": 0.06949528196128085,
+        "max": 0.06949528196128085,
+        "mean": 0.06949528196128085,
+        "min": 0.06949528196128085,
+        "stdev": 0.0
+      },
+      "ttft_latency_min": {
+        "ci95_high": 0.03615276305936277,
+        "ci95_low": 0.03615276305936277,
+        "max": 0.03615276305936277,
+        "mean": 0.03615276305936277,
+        "min": 0.03615276305936277,
+        "stdev": 0.0
+      },
+      "ttft_latency_p90": {
+        "ci95_high": 0.10750410477630795,
+        "ci95_low": 0.10750410477630795,
+        "max": 0.10750410477630795,
+        "mean": 0.10750410477630795,
+        "min": 0.10750410477630795,
+        "stdev": 0.0
+      },
+      "ttft_latency_p99": {
+        "ci95_high": 0.17294893098296615,
+        "ci95_low": 0.17294893098296615,
+        "max": 0.17294893098296615,
+        "mean": 0.17294893098296615,
+        "min": 0.17294893098296615,
+        "stdev": 0.0
+      },
+      "warmup_inflight_at_measurement_start": {
+        "ci95_high": 2.0,
+        "ci95_low": 2.0,
+        "max": 2,
+        "mean": 2.0,
+        "min": 2,
+        "stdev": 0.0
+      },
+      "working_set_gb_actual": 20.25,
+      "working_set_to_gpu_kv_ratio": {
+        "ci95_high": 2.537444933920705,
+        "ci95_low": 2.537444933920705,
+        "max": 2.537444933920705,
+        "mean": 2.537444933920705,
+        "min": 2.537444933920705,
+        "stdev": 0.0
+      }
+    },
+    "v2": {
+      "achieved_throughput": {
+        "ci95_high": 1.9831205698459307,
+        "ci95_low": 1.9831205698459307,
+        "max": 1.9831205698459307,
+        "mean": 1.9831205698459307,
+        "min": 1.9831205698459307,
+        "stdev": 0.0
+      },
+      "arrival_mode": "poisson",
+      "cpu_prefix_cache_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_metadata_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_restored_token_count": {
+        "ci95_high": 1227776.0,
+        "ci95_low": 1227776.0,
+        "max": 1227776,
+        "mean": 1227776.0,
+        "min": 1227776,
+        "stdev": 0.0
+      },
+      "cpu_prefix_d2h_bytes": {
+        "ci95_high": 1207959552.0,
+        "ci95_low": 1207959552.0,
+        "max": 1207959552,
+        "mean": 1207959552.0,
+        "min": 1207959552,
+        "stdev": 0.0
+      },
+      "cpu_prefix_h2d_bytes": {
+        "ci95_high": 181042937856.0,
+        "ci95_low": 181042937856.0,
+        "max": 181042937856,
+        "mean": 181042937856.0,
+        "min": 181042937856,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes": {
+        "ci95_high": 21743271936.0,
+        "ci95_low": 21743271936.0,
+        "max": 21743271936,
+        "mean": 21743271936.0,
+        "min": 21743271936,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes_peak": {
+        "ci95_high": 21743271936.0,
+        "ci95_low": 21743271936.0,
+        "max": 21743271936,
+        "mean": 21743271936.0,
+        "min": 21743271936,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb_peak": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_exhausted_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_free_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb_requested": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_on_demand_alloc_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_gb": {
+        "ci95_high": 20.25,
+        "ci95_low": 20.25,
+        "max": 20.25,
+        "mean": 20.25,
+        "min": 20.25,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reuse_count": {
+        "ci95_high": 32.0,
+        "ci95_low": 32.0,
+        "max": 32,
+        "mean": 32.0,
+        "min": 32,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_used_block_count": {
+        "ci95_high": 576.0,
+        "ci95_low": 576.0,
+        "max": 576,
+        "mean": 576.0,
+        "min": 576,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_writeback_rejected_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_restore_latency_sum": {
+        "ci95_high": 3.627135644316673,
+        "ci95_low": 3.627135644316673,
+        "max": 3.627135644316673,
+        "mean": 3.627135644316673,
+        "min": 3.627135644316673,
+        "stdev": 0.0
+      },
+      "cpu_prefix_writeback_latency_sum": {
+        "ci95_high": 0.04036684799194336,
+        "ci95_low": 0.04036684799194336,
+        "max": 0.04036684799194336,
+        "mean": 0.04036684799194336,
+        "min": 0.04036684799194336,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_block_count": {
+        "ci95_high": 4796.0,
+        "ci95_low": 4796.0,
+        "max": 4796,
+        "mean": 4796.0,
+        "min": 4796,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_request_count": {
+        "ci95_high": 153.0,
+        "ci95_low": 153.0,
+        "max": 153,
+        "mean": 153.0,
+        "min": 153,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_token_count": {
+        "ci95_high": 1227776.0,
+        "ci95_low": 1227776.0,
+        "max": 1227776,
+        "mean": 1227776.0,
+        "min": 1227776,
+        "stdev": 0.0
+      },
+      "decode_step_count": {
+        "ci95_high": 2225.0,
+        "ci95_low": 2225.0,
+        "max": 2225,
+        "mean": 2225.0,
+        "min": 2225,
+        "stdev": 0.0
+      },
+      "decode_step_time_avg_sec": {
+        "ci95_high": 0.028208798052052432,
+        "ci95_low": 0.028208798052052432,
+        "max": 0.028208798052052432,
+        "mean": 0.028208798052052432,
+        "min": 0.028208798052052432,
+        "stdev": 0.0
+      },
+      "decode_step_time_sec": {
+        "ci95_high": 62.764575665816665,
+        "ci95_low": 62.764575665816665,
+        "max": 62.764575665816665,
+        "mean": 62.764575665816665,
+        "min": 62.764575665816665,
+        "stdev": 0.0
+      },
+      "decode_step_time_total_sec": {
+        "ci95_high": 62.764575665816665,
+        "ci95_low": 62.764575665816665,
+        "max": 62.764575665816665,
+        "mean": 62.764575665816665,
+        "min": 62.764575665816665,
+        "stdev": 0.0
+      },
+      "decode_timed_tokens": {
+        "ci95_high": 3792.0,
+        "ci95_low": 3792.0,
+        "max": 3792,
+        "mean": 3792.0,
+        "min": 3792,
+        "stdev": 0.0
+      },
+      "document_recomputed_tokens_est": {
+        "ci95_high": 8192.0,
+        "ci95_low": 8192.0,
+        "max": 8192,
+        "mean": 8192.0,
+        "min": 8192,
+        "stdev": 0.0
+      },
+      "gpu_kv_cache_gb_actual": 7.98046875,
+      "gpu_lru_cached_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "gpu_lru_cached_block_peak": {
+        "ci95_high": 226.0,
+        "ci95_low": 226.0,
+        "max": 226,
+        "mean": 226.0,
+        "min": 226,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_cpu_backed_block_count": {
+        "ci95_high": 4829.0,
+        "ci95_low": 4829.0,
+        "max": 4829,
+        "mean": 4829.0,
+        "min": 4829,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_gpu_only_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "gpu_lru_eviction_count": {
+        "ci95_high": 4829.0,
+        "ci95_low": 4829.0,
+        "max": 4829,
+        "mean": 4829.0,
+        "min": 4829,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_block_count": {
+        "ci95_high": 2756.0,
+        "ci95_low": 2756.0,
+        "max": 2756,
+        "mean": 2756.0,
+        "min": 2756,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_token_count": {
+        "ci95_high": 705536.0,
+        "ci95_low": 705536.0,
+        "max": 705536,
+        "mean": 705536.0,
+        "min": 705536,
+        "stdev": 0.0
+      },
+      "gpu_prefix_miss_request_count": {
+        "ci95_high": 154.0,
+        "ci95_low": 154.0,
+        "max": 154,
+        "mean": 154.0,
+        "min": 154,
+        "stdev": 0.0
+      },
+      "inactive_cpu_backed_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "inactive_gpu_only_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_pending_writeback_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_safe_or_pending_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "lazy_writeback_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_scheduled_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "lazy_writeback_target_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "max_num_batched_tokens": {
+        "ci95_high": 33152.0,
+        "ci95_low": 33152.0,
+        "max": 33152,
+        "mean": 33152.0,
+        "min": 33152,
+        "stdev": 0.0
+      },
+      "max_num_seqs": {
+        "ci95_high": 8.0,
+        "ci95_low": 8.0,
+        "max": 8,
+        "mean": 8.0,
+        "min": 8,
+        "stdev": 0.0
+      },
+      "measured_workload_profile": {
+        "access_counts": {
+          "0": 10,
+          "1": 18,
+          "10": 13,
+          "11": 23,
+          "12": 6,
+          "13": 10,
+          "14": 9,
+          "15": 9,
+          "16": 15,
+          "17": 9,
+          "2": 14,
+          "3": 12,
+          "4": 20,
+          "5": 19,
+          "6": 16,
+          "7": 15,
+          "8": 16,
+          "9": 18
+        },
+        "realized_working_set_gb": 20.25,
+        "realized_working_set_tokens": 147456,
+        "request_count": 252,
+        "reuse_distance": {
+          "avg": 7.816239316239316,
+          "count": 234,
+          "max": 17,
+          "median": 8.0,
+          "min": 0,
+          "p90": 15.0,
+          "p99": 17.0
+        },
+        "unique_document_count": 18,
+        "working_set_to_gpu_kv_ratio": 2.537444933920705
+      },
+      "model_runner_call_time_sec": {
+        "ci95_high": 71.00403168273624,
+        "ci95_low": 71.00403168273624,
+        "max": 71.00403168273624,
+        "mean": 71.00403168273624,
+        "min": 71.00403168273624,
+        "stdev": 0.0
+      },
+      "num_documents": 18,
+      "offered_rate_realized": {
+        "ci95_high": 1.9824949257090796,
+        "ci95_low": 1.9824949257090796,
+        "max": 1.9824949257090796,
+        "mean": 1.9824949257090796,
+        "min": 1.9824949257090796,
+        "stdev": 0.0
+      },
+      "planned_arrival_span_sec": {
+        "ci95_high": 126.6081424698854,
+        "ci95_low": 126.6081424698854,
+        "max": 126.6081424698854,
+        "mean": 126.6081424698854,
+        "min": 126.6081424698854,
+        "stdev": 0.0
+      },
+      "postprocess_time_sec": {
+        "ci95_high": 0.04240422381553799,
+        "ci95_low": 0.04240422381553799,
+        "max": 0.04240422381553799,
+        "mean": 0.04240422381553799,
+        "min": 0.04240422381553799,
+        "stdev": 0.0
+      },
+      "prefill_model_cuda_sec": {
+        "ci95_high": 8.171244735717774,
+        "ci95_low": 8.171244735717774,
+        "max": 8.171244735717774,
+        "mean": 8.171244735717774,
+        "min": 8.171244735717774,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_count": {
+        "ci95_high": 243.0,
+        "ci95_low": 243.0,
+        "max": 243,
+        "mean": 243.0,
+        "min": 243,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_wall_sec": {
+        "ci95_high": 8.297533944481984,
+        "ci95_low": 8.297533944481984,
+        "max": 8.297533944481984,
+        "mean": 8.297533944481984,
+        "min": 8.297533944481984,
+        "stdev": 0.0
+      },
+      "prefill_prepare_wall_sec": {
+        "ci95_high": 0.06044334464240819,
+        "ci95_low": 0.06044334464240819,
+        "max": 0.06044334464240819,
+        "mean": 0.06044334464240819,
+        "min": 0.06044334464240819,
+        "stdev": 0.0
+      },
+      "prefill_sample_prepare_wall_sec": {
+        "ci95_high": 0.006809529149904847,
+        "ci95_low": 0.006809529149904847,
+        "max": 0.006809529149904847,
+        "mean": 0.006809529149904847,
+        "min": 0.006809529149904847,
+        "stdev": 0.0
+      },
+      "prefill_sampler_wall_sec": {
+        "ci95_high": 0.3238308624131605,
+        "ci95_low": 0.3238308624131605,
+        "max": 0.3238308624131605,
+        "mean": 0.3238308624131605,
+        "min": 0.3238308624131605,
+        "stdev": 0.0
+      },
+      "prefill_step_time_avg_sec": {
+        "ci95_high": 0.05061088895680069,
+        "ci95_low": 0.05061088895680069,
+        "max": 0.05061088895680069,
+        "mean": 0.05061088895680069,
+        "min": 0.05061088895680069,
+        "stdev": 0.0
+      },
+      "prefill_step_time_sec": {
+        "ci95_high": 12.298446016502567,
+        "ci95_low": 12.298446016502567,
+        "max": 12.298446016502567,
+        "mean": 12.298446016502567,
+        "min": 12.298446016502567,
+        "stdev": 0.0
+      },
+      "prefill_step_time_total_sec": {
+        "ci95_high": 12.298446016502567,
+        "ci95_low": 12.298446016502567,
+        "max": 12.298446016502567,
+        "mean": 12.298446016502567,
+        "min": 12.298446016502567,
+        "stdev": 0.0
+      },
+      "prefill_timed_tok_per_sec": {
+        "ci95_high": 2633.1782045102123,
+        "ci95_low": 2633.1782045102123,
+        "max": 2633.1782045102123,
+        "mean": 2633.1782045102123,
+        "min": 2633.1782045102123,
+        "stdev": 0.0
+      },
+      "prefill_token_count": {
+        "ci95_high": 32384.0,
+        "ci95_low": 32384.0,
+        "max": 32384,
+        "mean": 32384.0,
+        "min": 32384,
+        "stdev": 0.0
+      },
+      "prefix_cache_reused_token_count": {
+        "ci95_high": 828416.0,
+        "ci95_low": 828416.0,
+        "max": 828416,
+        "mean": 828416.0,
+        "min": 828416,
+        "stdev": 0.0
+      },
+      "query_elapsed_sec": {
+        "ci95_high": 127.07245531701483,
+        "ci95_low": 127.07245531701483,
+        "max": 127.07245531701483,
+        "mean": 127.07245531701483,
+        "min": 127.07245531701483,
+        "stdev": 0.0
+      },
+      "query_requests": 252,
+      "queueing_latency_avg": {
+        "ci95_high": 0.009966782559382005,
+        "ci95_low": 0.009966782559382005,
+        "max": 0.009966782559382005,
+        "mean": 0.009966782559382005,
+        "min": 0.009966782559382005,
+        "stdev": 0.0
+      },
+      "queueing_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "queueing_latency_max": {
+        "ci95_high": 0.05245991097763181,
+        "ci95_low": 0.05245991097763181,
+        "max": 0.05245991097763181,
+        "mean": 0.05245991097763181,
+        "min": 0.05245991097763181,
+        "stdev": 0.0
+      },
+      "queueing_latency_median": {
+        "ci95_high": 0.00625254213809967,
+        "ci95_low": 0.00625254213809967,
+        "max": 0.00625254213809967,
+        "mean": 0.00625254213809967,
+        "min": 0.00625254213809967,
+        "stdev": 0.0
+      },
+      "queueing_latency_min": {
+        "ci95_high": 6.571807898581028e-05,
+        "ci95_low": 6.571807898581028e-05,
+        "max": 6.571807898581028e-05,
+        "mean": 6.571807898581028e-05,
+        "min": 6.571807898581028e-05,
+        "stdev": 0.0
+      },
+      "queueing_latency_p90": {
+        "ci95_high": 0.024631426960695535,
+        "ci95_low": 0.024631426960695535,
+        "max": 0.024631426960695535,
+        "mean": 0.024631426960695535,
+        "min": 0.024631426960695535,
+        "stdev": 0.0
+      },
+      "queueing_latency_p99": {
+        "ci95_high": 0.044431644268333924,
+        "ci95_low": 0.044431644268333924,
+        "max": 0.044431644268333924,
+        "mean": 0.044431644268333924,
+        "min": 0.044431644268333924,
+        "stdev": 0.0
+      },
+      "request_latency_avg": {
+        "ci95_high": 0.5368713582306915,
+        "ci95_low": 0.5368713582306915,
+        "max": 0.5368713582306915,
+        "mean": 0.5368713582306915,
+        "min": 0.5368713582306915,
+        "stdev": 0.0
+      },
+      "request_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "request_latency_max": {
+        "ci95_high": 0.8015984378289431,
+        "ci95_low": 0.8015984378289431,
+        "max": 0.8015984378289431,
+        "mean": 0.8015984378289431,
+        "min": 0.8015984378289431,
+        "stdev": 0.0
+      },
+      "request_latency_median": {
+        "ci95_high": 0.5291886999038979,
+        "ci95_low": 0.5291886999038979,
+        "max": 0.5291886999038979,
+        "mean": 0.5291886999038979,
+        "min": 0.5291886999038979,
+        "stdev": 0.0
+      },
+      "request_latency_min": {
+        "ci95_high": 0.4450028813444078,
+        "ci95_low": 0.4450028813444078,
+        "max": 0.4450028813444078,
+        "mean": 0.4450028813444078,
+        "min": 0.4450028813444078,
+        "stdev": 0.0
+      },
+      "request_latency_p90": {
+        "ci95_high": 0.6230106831062586,
+        "ci95_low": 0.6230106831062586,
+        "max": 0.6230106831062586,
+        "mean": 0.6230106831062586,
+        "min": 0.6230106831062586,
+        "stdev": 0.0
+      },
+      "request_latency_p99": {
+        "ci95_high": 0.7092694258387202,
+        "ci95_low": 0.7092694258387202,
+        "max": 0.7092694258387202,
+        "mean": 0.7092694258387202,
+        "min": 0.7092694258387202,
+        "stdev": 0.0
+      },
+      "request_rate_target": 2.0,
+      "reusable_prefix_length": 8192,
+      "run_ids": [
+        1
+      ],
+      "runs": 1,
+      "safe_allocatable_block_count": {
+        "ci95_high": 227.0,
+        "ci95_low": 227.0,
+        "max": 227,
+        "mean": 227.0,
+        "min": 227,
+        "stdev": 0.0
+      },
+      "schedule_time_sec": {
+        "ci95_high": 3.99812436720822,
+        "ci95_low": 3.99812436720822,
+        "max": 3.99812436720822,
+        "mean": 3.99812436720822,
+        "min": 3.99812436720822,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_writeback_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_useful_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_wall_sec": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wasted_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_future_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_no_visible_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_visible_request_count_max": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "single_prompt_fit_count_est": {
+        "ci95_high": 6.0,
+        "ci95_low": 6.0,
+        "max": 6,
+        "mean": 6.0,
+        "min": 6,
+        "stdev": 0.0
+      },
+      "single_prompt_kv_gb_est": {
+        "ci95_high": 1.140380859375,
+        "ci95_low": 1.140380859375,
+        "max": 1.140380859375,
+        "mean": 1.140380859375,
+        "min": 1.140380859375,
+        "stdev": 0.0
+      },
+      "single_prompt_to_gpu_kv_ratio": {
+        "ci95_high": 0.1428964757709251,
+        "ci95_low": 0.1428964757709251,
+        "max": 0.1428964757709251,
+        "mean": 0.1428964757709251,
+        "min": 0.1428964757709251,
+        "stdev": 0.0
+      },
+      "temperature": 0.0,
+      "ttft_latency_avg": {
+        "ci95_high": 0.061459353943410816,
+        "ci95_low": 0.061459353943410816,
+        "max": 0.061459353943410816,
+        "mean": 0.061459353943410816,
+        "min": 0.061459353943410816,
+        "stdev": 0.0
+      },
+      "ttft_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "ttft_latency_max": {
+        "ci95_high": 0.25176392681896687,
+        "ci95_low": 0.25176392681896687,
+        "max": 0.25176392681896687,
+        "mean": 0.25176392681896687,
+        "min": 0.25176392681896687,
+        "stdev": 0.0
+      },
+      "ttft_latency_median": {
+        "ci95_high": 0.06112639146158472,
+        "ci95_low": 0.06112639146158472,
+        "max": 0.06112639146158472,
+        "mean": 0.06112639146158472,
+        "min": 0.06112639146158472,
+        "stdev": 0.0
+      },
+      "ttft_latency_min": {
+        "ci95_high": 0.03372656833380461,
+        "ci95_low": 0.03372656833380461,
+        "max": 0.03372656833380461,
+        "mean": 0.03372656833380461,
+        "min": 0.03372656833380461,
+        "stdev": 0.0
+      },
+      "ttft_latency_p90": {
+        "ci95_high": 0.08364197233458981,
+        "ci95_low": 0.08364197233458981,
+        "max": 0.08364197233458981,
+        "mean": 0.08364197233458981,
+        "min": 0.08364197233458981,
+        "stdev": 0.0
+      },
+      "ttft_latency_p99": {
+        "ci95_high": 0.11292697065393448,
+        "ci95_low": 0.11292697065393448,
+        "max": 0.11292697065393448,
+        "mean": 0.11292697065393448,
+        "min": 0.11292697065393448,
+        "stdev": 0.0
+      },
+      "warmup_inflight_at_measurement_start": {
+        "ci95_high": 2.0,
+        "ci95_low": 2.0,
+        "max": 2,
+        "mean": 2.0,
+        "min": 2,
+        "stdev": 0.0
+      },
+      "working_set_gb_actual": 20.25,
+      "working_set_to_gpu_kv_ratio": {
+        "ci95_high": 2.537444933920705,
+        "ci95_low": 2.537444933920705,
+        "max": 2.537444933920705,
+        "mean": 2.537444933920705,
+        "min": 2.537444933920705,
+        "stdev": 0.0
+      }
+    },
+    "v3": {
+      "achieved_throughput": {
+        "ci95_high": 1.9832460549240645,
+        "ci95_low": 1.9832460549240645,
+        "max": 1.9832460549240645,
+        "mean": 1.9832460549240645,
+        "min": 1.9832460549240645,
+        "stdev": 0.0
+      },
+      "arrival_mode": "poisson",
+      "cpu_prefix_cache_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_bytes": {
+        "ci95_high": 193651015680.0,
+        "ci95_low": 193651015680.0,
+        "max": 193651015680,
+        "mean": 193651015680.0,
+        "min": 193651015680,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_metadata_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_eviction_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_restored_token_count": {
+        "ci95_high": 1194752.0,
+        "ci95_low": 1194752.0,
+        "max": 1194752,
+        "mean": 1194752.0,
+        "min": 1194752,
+        "stdev": 0.0
+      },
+      "cpu_prefix_d2h_bytes": {
+        "ci95_high": 193651015680.0,
+        "ci95_low": 193651015680.0,
+        "max": 193651015680,
+        "mean": 193651015680.0,
+        "min": 193651015680,
+        "stdev": 0.0
+      },
+      "cpu_prefix_h2d_bytes": {
+        "ci95_high": 176173350912.0,
+        "ci95_low": 176173350912.0,
+        "max": 176173350912,
+        "mean": 176173350912.0,
+        "min": 176173350912,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes": {
+        "ci95_high": 16080961536.0,
+        "ci95_low": 16080961536.0,
+        "max": 16080961536,
+        "mean": 16080961536.0,
+        "min": 16080961536,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes_peak": {
+        "ci95_high": 16080961536.0,
+        "ci95_low": 16080961536.0,
+        "max": 16080961536,
+        "mean": 16080961536.0,
+        "min": 16080961536,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb_peak": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_exhausted_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_free_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb": {
+        "ci95_high": 15.0,
+        "ci95_low": 15.0,
+        "max": 15.0,
+        "mean": 15.0,
+        "min": 15.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb_requested": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_on_demand_alloc_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_gb": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reuse_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_used_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_writeback_rejected_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_restore_latency_sum": {
+        "ci95_high": 3.526780477523804,
+        "ci95_low": 3.526780477523804,
+        "max": 3.526780477523804,
+        "mean": 3.526780477523804,
+        "min": 3.526780477523804,
+        "stdev": 0.0
+      },
+      "cpu_prefix_writeback_latency_sum": {
+        "ci95_high": 4.639261359930039,
+        "ci95_low": 4.639261359930039,
+        "max": 4.639261359930039,
+        "mean": 4.639261359930039,
+        "min": 4.639261359930039,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_block_count": {
+        "ci95_high": 4667.0,
+        "ci95_low": 4667.0,
+        "max": 4667,
+        "mean": 4667.0,
+        "min": 4667,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_request_count": {
+        "ci95_high": 152.0,
+        "ci95_low": 152.0,
+        "max": 152,
+        "mean": 152.0,
+        "min": 152,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_token_count": {
+        "ci95_high": 1194752.0,
+        "ci95_low": 1194752.0,
+        "max": 1194752,
+        "mean": 1194752.0,
+        "min": 1194752,
+        "stdev": 0.0
+      },
+      "decode_step_count": {
+        "ci95_high": 2162.0,
+        "ci95_low": 2162.0,
+        "max": 2162,
+        "mean": 2162.0,
+        "min": 2162,
+        "stdev": 0.0
+      },
+      "decode_step_time_avg_sec": {
+        "ci95_high": 0.029004089341567403,
+        "ci95_low": 0.029004089341567403,
+        "max": 0.029004089341567403,
+        "mean": 0.029004089341567403,
+        "min": 0.029004089341567403,
+        "stdev": 0.0
+      },
+      "decode_step_time_sec": {
+        "ci95_high": 62.70684115646873,
+        "ci95_low": 62.70684115646873,
+        "max": 62.70684115646873,
+        "mean": 62.70684115646873,
+        "min": 62.70684115646873,
+        "stdev": 0.0
+      },
+      "decode_step_time_total_sec": {
+        "ci95_high": 62.70684115646873,
+        "ci95_low": 62.70684115646873,
+        "max": 62.70684115646873,
+        "mean": 62.70684115646873,
+        "min": 62.70684115646873,
+        "stdev": 0.0
+      },
+      "decode_timed_tokens": {
+        "ci95_high": 3792.0,
+        "ci95_low": 3792.0,
+        "max": 3792,
+        "mean": 3792.0,
+        "min": 3792,
+        "stdev": 0.0
+      },
+      "document_recomputed_tokens_est": {
+        "ci95_high": 35072.0,
+        "ci95_low": 35072.0,
+        "max": 35072,
+        "mean": 35072.0,
+        "min": 35072,
+        "stdev": 0.0
+      },
+      "gpu_kv_cache_gb_actual": 7.98046875,
+      "gpu_lru_cached_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "gpu_lru_cached_block_peak": {
+        "ci95_high": 226.0,
+        "ci95_low": 226.0,
+        "max": 226,
+        "mean": 226.0,
+        "min": 226,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_cpu_backed_block_count": {
+        "ci95_high": 4732.0,
+        "ci95_low": 4732.0,
+        "max": 4732,
+        "mean": 4732.0,
+        "min": 4732,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_gpu_only_block_count": {
+        "ci95_high": 73.0,
+        "ci95_low": 73.0,
+        "max": 73,
+        "mean": 73.0,
+        "min": 73,
+        "stdev": 0.0
+      },
+      "gpu_lru_eviction_count": {
+        "ci95_high": 4805.0,
+        "ci95_low": 4805.0,
+        "max": 4805,
+        "mean": 4805.0,
+        "min": 4805,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_block_count": {
+        "ci95_high": 2684.0,
+        "ci95_low": 2684.0,
+        "max": 2684,
+        "mean": 2684.0,
+        "min": 2684,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_token_count": {
+        "ci95_high": 687104.0,
+        "ci95_low": 687104.0,
+        "max": 687104,
+        "mean": 687104.0,
+        "min": 687104,
+        "stdev": 0.0
+      },
+      "gpu_prefix_miss_request_count": {
+        "ci95_high": 155.0,
+        "ci95_low": 155.0,
+        "max": 155,
+        "mean": 155.0,
+        "min": 155,
+        "stdev": 0.0
+      },
+      "inactive_cpu_backed_block_count": {
+        "ci95_high": 74.0,
+        "ci95_low": 74.0,
+        "max": 74,
+        "mean": 74.0,
+        "min": 74,
+        "stdev": 0.0
+      },
+      "inactive_gpu_only_block_count": {
+        "ci95_high": 150.0,
+        "ci95_low": 150.0,
+        "max": 150,
+        "mean": 150.0,
+        "min": 150,
+        "stdev": 0.0
+      },
+      "inactive_pending_writeback_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_safe_or_pending_block_count": {
+        "ci95_high": 74.0,
+        "ci95_low": 74.0,
+        "max": 74,
+        "mean": 74.0,
+        "min": 74,
+        "stdev": 0.0
+      },
+      "lazy_writeback_completed_block_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "lazy_writeback_scheduled_block_count": {
+        "ci95_high": 5130.0,
+        "ci95_low": 5130.0,
+        "max": 5130,
+        "mean": 5130.0,
+        "min": 5130,
+        "stdev": 0.0
+      },
+      "lazy_writeback_target_block_count": {
+        "ci95_high": 40.0,
+        "ci95_low": 40.0,
+        "max": 40,
+        "mean": 40.0,
+        "min": 40,
+        "stdev": 0.0
+      },
+      "max_num_batched_tokens": {
+        "ci95_high": 33152.0,
+        "ci95_low": 33152.0,
+        "max": 33152,
+        "mean": 33152.0,
+        "min": 33152,
+        "stdev": 0.0
+      },
+      "max_num_seqs": {
+        "ci95_high": 8.0,
+        "ci95_low": 8.0,
+        "max": 8,
+        "mean": 8.0,
+        "min": 8,
+        "stdev": 0.0
+      },
+      "measured_workload_profile": {
+        "access_counts": {
+          "0": 10,
+          "1": 18,
+          "10": 13,
+          "11": 23,
+          "12": 6,
+          "13": 10,
+          "14": 9,
+          "15": 9,
+          "16": 15,
+          "17": 9,
+          "2": 14,
+          "3": 12,
+          "4": 20,
+          "5": 19,
+          "6": 16,
+          "7": 15,
+          "8": 16,
+          "9": 18
+        },
+        "realized_working_set_gb": 20.25,
+        "realized_working_set_tokens": 147456,
+        "request_count": 252,
+        "reuse_distance": {
+          "avg": 7.816239316239316,
+          "count": 234,
+          "max": 17,
+          "median": 8.0,
+          "min": 0,
+          "p90": 15.0,
+          "p99": 17.0
+        },
+        "unique_document_count": 18,
+        "working_set_to_gpu_kv_ratio": 2.537444933920705
+      },
+      "model_runner_call_time_sec": {
+        "ci95_high": 72.02623402699828,
+        "ci95_low": 72.02623402699828,
+        "max": 72.02623402699828,
+        "mean": 72.02623402699828,
+        "min": 72.02623402699828,
+        "stdev": 0.0
+      },
+      "num_documents": 18,
+      "offered_rate_realized": {
+        "ci95_high": 1.9824949257090796,
+        "ci95_low": 1.9824949257090796,
+        "max": 1.9824949257090796,
+        "mean": 1.9824949257090796,
+        "min": 1.9824949257090796,
+        "stdev": 0.0
+      },
+      "planned_arrival_span_sec": {
+        "ci95_high": 126.6081424698854,
+        "ci95_low": 126.6081424698854,
+        "max": 126.6081424698854,
+        "mean": 126.6081424698854,
+        "min": 126.6081424698854,
+        "stdev": 0.0
+      },
+      "postprocess_time_sec": {
+        "ci95_high": 0.03310169605538249,
+        "ci95_low": 0.03310169605538249,
+        "max": 0.03310169605538249,
+        "mean": 0.03310169605538249,
+        "min": 0.03310169605538249,
+        "stdev": 0.0
+      },
+      "prefill_model_cuda_sec": {
+        "ci95_high": 9.248965103149411,
+        "ci95_low": 9.248965103149411,
+        "max": 9.248965103149411,
+        "mean": 9.248965103149411,
+        "min": 9.248965103149411,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_count": {
+        "ci95_high": 243.0,
+        "ci95_low": 243.0,
+        "max": 243,
+        "mean": 243.0,
+        "min": 243,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_wall_sec": {
+        "ci95_high": 9.378808619221672,
+        "ci95_low": 9.378808619221672,
+        "max": 9.378808619221672,
+        "mean": 9.378808619221672,
+        "min": 9.378808619221672,
+        "stdev": 0.0
+      },
+      "prefill_prepare_wall_sec": {
+        "ci95_high": 0.06372831657063216,
+        "ci95_low": 0.06372831657063216,
+        "max": 0.06372831657063216,
+        "mean": 0.06372831657063216,
+        "min": 0.06372831657063216,
+        "stdev": 0.0
+      },
+      "prefill_sample_prepare_wall_sec": {
+        "ci95_high": 0.006703249644488096,
+        "ci95_low": 0.006703249644488096,
+        "max": 0.006703249644488096,
+        "mean": 0.006703249644488096,
+        "min": 0.006703249644488096,
+        "stdev": 0.0
+      },
+      "prefill_sampler_wall_sec": {
+        "ci95_high": 1.0373762919334695,
+        "ci95_low": 1.0373762919334695,
+        "max": 1.0373762919334695,
+        "mean": 1.0373762919334695,
+        "min": 1.0373762919334695,
+        "stdev": 0.0
+      },
+      "prefill_step_time_avg_sec": {
+        "ci95_high": 0.05668145692964763,
+        "ci95_low": 0.05668145692964763,
+        "max": 0.05668145692964763,
+        "mean": 0.05668145692964763,
+        "min": 0.05668145692964763,
+        "stdev": 0.0
+      },
+      "prefill_step_time_sec": {
+        "ci95_high": 13.773594033904374,
+        "ci95_low": 13.773594033904374,
+        "max": 13.773594033904374,
+        "mean": 13.773594033904374,
+        "min": 13.773594033904374,
+        "stdev": 0.0
+      },
+      "prefill_step_time_total_sec": {
+        "ci95_high": 13.773594033904374,
+        "ci95_low": 13.773594033904374,
+        "max": 13.773594033904374,
+        "mean": 13.773594033904374,
+        "min": 13.773594033904374,
+        "stdev": 0.0
+      },
+      "prefill_timed_tok_per_sec": {
+        "ci95_high": 4302.725915553978,
+        "ci95_low": 4302.725915553978,
+        "max": 4302.725915553978,
+        "mean": 4302.725915553978,
+        "min": 4302.725915553978,
+        "stdev": 0.0
+      },
+      "prefill_token_count": {
+        "ci95_high": 59264.0,
+        "ci95_low": 59264.0,
+        "max": 59264,
+        "mean": 59264.0,
+        "min": 59264,
+        "stdev": 0.0
+      },
+      "prefix_cache_reused_token_count": {
+        "ci95_high": 834560.0,
+        "ci95_low": 834560.0,
+        "max": 834560,
+        "mean": 834560.0,
+        "min": 834560,
+        "stdev": 0.0
+      },
+      "query_elapsed_sec": {
+        "ci95_high": 127.0644151159795,
+        "ci95_low": 127.0644151159795,
+        "max": 127.0644151159795,
+        "mean": 127.0644151159795,
+        "min": 127.0644151159795,
+        "stdev": 0.0
+      },
+      "query_requests": 252,
+      "queueing_latency_avg": {
+        "ci95_high": 0.012445393407399514,
+        "ci95_low": 0.012445393407399514,
+        "max": 0.012445393407399514,
+        "mean": 0.012445393407399514,
+        "min": 0.012445393407399514,
+        "stdev": 0.0
+      },
+      "queueing_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "queueing_latency_max": {
+        "ci95_high": 0.21858356182929128,
+        "ci95_low": 0.21858356182929128,
+        "max": 0.21858356182929128,
+        "mean": 0.21858356182929128,
+        "min": 0.21858356182929128,
+        "stdev": 0.0
+      },
+      "queueing_latency_median": {
+        "ci95_high": 0.006134820927400142,
+        "ci95_low": 0.006134820927400142,
+        "max": 0.006134820927400142,
+        "mean": 0.006134820927400142,
+        "min": 0.006134820927400142,
+        "stdev": 0.0
+      },
+      "queueing_latency_min": {
+        "ci95_high": 4.6664965339004993e-05,
+        "ci95_low": 4.6664965339004993e-05,
+        "max": 4.6664965339004993e-05,
+        "mean": 4.6664965339004993e-05,
+        "min": 4.6664965339004993e-05,
+        "stdev": 0.0
+      },
+      "queueing_latency_p90": {
+        "ci95_high": 0.026460696617141368,
+        "ci95_low": 0.026460696617141368,
+        "max": 0.026460696617141368,
+        "mean": 0.026460696617141368,
+        "min": 0.026460696617141368,
+        "stdev": 0.0
+      },
+      "queueing_latency_p99": {
+        "ci95_high": 0.06625471085310006,
+        "ci95_low": 0.06625471085310006,
+        "max": 0.06625471085310006,
+        "mean": 0.06625471085310006,
+        "min": 0.06625471085310006,
+        "stdev": 0.0
+      },
+      "request_latency_avg": {
+        "ci95_high": 0.5706568446545307,
+        "ci95_low": 0.5706568446545307,
+        "max": 0.5706568446545307,
+        "mean": 0.5706568446545307,
+        "min": 0.5706568446545307,
+        "stdev": 0.0
+      },
+      "request_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "request_latency_max": {
+        "ci95_high": 1.0822367728687823,
+        "ci95_low": 1.0822367728687823,
+        "max": 1.0822367728687823,
+        "mean": 1.0822367728687823,
+        "min": 1.0822367728687823,
+        "stdev": 0.0
+      },
+      "request_latency_median": {
+        "ci95_high": 0.538366032356862,
+        "ci95_low": 0.538366032356862,
+        "max": 0.538366032356862,
+        "mean": 0.538366032356862,
+        "min": 0.538366032356862,
+        "stdev": 0.0
+      },
+      "request_latency_min": {
+        "ci95_high": 0.4299823463661596,
+        "ci95_low": 0.4299823463661596,
+        "max": 0.4299823463661596,
+        "mean": 0.4299823463661596,
+        "min": 0.4299823463661596,
+        "stdev": 0.0
+      },
+      "request_latency_p90": {
+        "ci95_high": 0.737438548973296,
+        "ci95_low": 0.737438548973296,
+        "max": 0.737438548973296,
+        "mean": 0.737438548973296,
+        "min": 0.737438548973296,
+        "stdev": 0.0
+      },
+      "request_latency_p99": {
+        "ci95_high": 0.9772727484640207,
+        "ci95_low": 0.9772727484640207,
+        "max": 0.9772727484640207,
+        "mean": 0.9772727484640207,
+        "min": 0.9772727484640207,
+        "stdev": 0.0
+      },
+      "request_rate_target": 2.0,
+      "reusable_prefix_length": 8192,
+      "run_ids": [
+        1
+      ],
+      "runs": 1,
+      "safe_allocatable_block_count": {
+        "ci95_high": 77.0,
+        "ci95_low": 77.0,
+        "max": 77,
+        "mean": 77.0,
+        "min": 77,
+        "stdev": 0.0
+      },
+      "schedule_time_sec": {
+        "ci95_high": 4.4021545010618865,
+        "ci95_low": 4.4021545010618865,
+        "max": 4.4021545010618865,
+        "mean": 4.4021545010618865,
+        "min": 4.4021545010618865,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_writeback_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_useful_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_wall_sec": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wasted_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_future_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_no_visible_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_visible_request_count_max": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "single_prompt_fit_count_est": {
+        "ci95_high": 6.0,
+        "ci95_low": 6.0,
+        "max": 6,
+        "mean": 6.0,
+        "min": 6,
+        "stdev": 0.0
+      },
+      "single_prompt_kv_gb_est": {
+        "ci95_high": 1.140380859375,
+        "ci95_low": 1.140380859375,
+        "max": 1.140380859375,
+        "mean": 1.140380859375,
+        "min": 1.140380859375,
+        "stdev": 0.0
+      },
+      "single_prompt_to_gpu_kv_ratio": {
+        "ci95_high": 0.1428964757709251,
+        "ci95_low": 0.1428964757709251,
+        "max": 0.1428964757709251,
+        "mean": 0.1428964757709251,
+        "min": 0.1428964757709251,
+        "stdev": 0.0
+      },
+      "temperature": 0.0,
+      "ttft_latency_avg": {
+        "ci95_high": 0.07100602451366343,
+        "ci95_low": 0.07100602451366343,
+        "max": 0.07100602451366343,
+        "mean": 0.07100602451366343,
+        "min": 0.07100602451366343,
+        "stdev": 0.0
+      },
+      "ttft_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "ttft_latency_max": {
+        "ci95_high": 0.3065585570875555,
+        "ci95_low": 0.3065585570875555,
+        "max": 0.3065585570875555,
+        "mean": 0.3065585570875555,
+        "min": 0.3065585570875555,
+        "stdev": 0.0
+      },
+      "ttft_latency_median": {
+        "ci95_high": 0.06288484192918986,
+        "ci95_low": 0.06288484192918986,
+        "max": 0.06288484192918986,
+        "mean": 0.06288484192918986,
+        "min": 0.06288484192918986,
+        "stdev": 0.0
+      },
+      "ttft_latency_min": {
+        "ci95_high": 0.0324822582770139,
+        "ci95_low": 0.0324822582770139,
+        "max": 0.0324822582770139,
+        "mean": 0.0324822582770139,
+        "min": 0.0324822582770139,
+        "stdev": 0.0
+      },
+      "ttft_latency_p90": {
+        "ci95_high": 0.09982031157705935,
+        "ci95_low": 0.09982031157705935,
+        "max": 0.09982031157705935,
+        "mean": 0.09982031157705935,
+        "min": 0.09982031157705935,
+        "stdev": 0.0
+      },
+      "ttft_latency_p99": {
+        "ci95_high": 0.2699704690778165,
+        "ci95_low": 0.2699704690778165,
+        "max": 0.2699704690778165,
+        "mean": 0.2699704690778165,
+        "min": 0.2699704690778165,
+        "stdev": 0.0
+      },
+      "warmup_inflight_at_measurement_start": {
+        "ci95_high": 2.0,
+        "ci95_low": 2.0,
+        "max": 2,
+        "mean": 2.0,
+        "min": 2,
+        "stdev": 0.0
+      },
+      "working_set_gb_actual": 20.25,
+      "working_set_to_gpu_kv_ratio": {
+        "ci95_high": 2.537444933920705,
+        "ci95_low": 2.537444933920705,
+        "max": 2.537444933920705,
+        "mean": 2.537444933920705,
+        "min": 2.537444933920705,
+        "stdev": 0.0
+      }
+    },
+    "v4": {
+      "achieved_throughput": {
+        "ci95_high": 1.9834629498470762,
+        "ci95_low": 1.9834629498470762,
+        "max": 1.9834629498470762,
+        "mean": 1.9834629498470762,
+        "min": 1.9834629498470762,
+        "stdev": 0.0
+      },
+      "arrival_mode": "poisson",
+      "cpu_prefix_cache_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_bytes": {
+        "ci95_high": 189234413568.0,
+        "ci95_low": 189234413568.0,
+        "max": 189234413568,
+        "mean": 189234413568.0,
+        "min": 189234413568,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_evicted_metadata_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_eviction_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "cpu_prefix_cache_restored_token_count": {
+        "ci95_high": 1186560.0,
+        "ci95_low": 1186560.0,
+        "max": 1186560,
+        "mean": 1186560.0,
+        "min": 1186560,
+        "stdev": 0.0
+      },
+      "cpu_prefix_d2h_bytes": {
+        "ci95_high": 189234413568.0,
+        "ci95_low": 189234413568.0,
+        "max": 189234413568,
+        "mean": 189234413568.0,
+        "min": 189234413568,
+        "stdev": 0.0
+      },
+      "cpu_prefix_h2d_bytes": {
+        "ci95_high": 174965391360.0,
+        "ci95_low": 174965391360.0,
+        "max": 174965391360,
+        "mean": 174965391360.0,
+        "min": 174965391360,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes": {
+        "ci95_high": 16080961536.0,
+        "ci95_low": 16080961536.0,
+        "max": 16080961536,
+        "mean": 16080961536.0,
+        "min": 16080961536,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_bytes_peak": {
+        "ci95_high": 16080961536.0,
+        "ci95_low": 16080961536.0,
+        "max": 16080961536,
+        "mean": 16080961536.0,
+        "min": 16080961536,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_kv_gb_peak": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_exhausted_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_free_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb": {
+        "ci95_high": 15.0,
+        "ci95_low": 15.0,
+        "max": 15.0,
+        "mean": 15.0,
+        "min": 15.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_gb_requested": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_on_demand_alloc_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reserved_gb": {
+        "ci95_high": 14.9765625,
+        "ci95_low": 14.9765625,
+        "max": 14.9765625,
+        "mean": 14.9765625,
+        "min": 14.9765625,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_reuse_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_used_block_count": {
+        "ci95_high": 426.0,
+        "ci95_low": 426.0,
+        "max": 426,
+        "mean": 426.0,
+        "min": 426,
+        "stdev": 0.0
+      },
+      "cpu_prefix_pool_writeback_rejected_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "cpu_prefix_restore_latency_sum": {
+        "ci95_high": 3.502245071232318,
+        "ci95_low": 3.502245071232318,
+        "max": 3.502245071232318,
+        "mean": 3.502245071232318,
+        "min": 3.502245071232318,
+        "stdev": 0.0
+      },
+      "cpu_prefix_writeback_latency_sum": {
+        "ci95_high": 4.5361754427552246,
+        "ci95_low": 4.5361754427552246,
+        "max": 4.5361754427552246,
+        "mean": 4.5361754427552246,
+        "min": 4.5361754427552246,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_block_count": {
+        "ci95_high": 4635.0,
+        "ci95_low": 4635.0,
+        "max": 4635,
+        "mean": 4635.0,
+        "min": 4635,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_request_count": {
+        "ci95_high": 148.0,
+        "ci95_low": 148.0,
+        "max": 148,
+        "mean": 148.0,
+        "min": 148,
+        "stdev": 0.0
+      },
+      "cpu_sync_swapin_token_count": {
+        "ci95_high": 1186560.0,
+        "ci95_low": 1186560.0,
+        "max": 1186560,
+        "mean": 1186560.0,
+        "min": 1186560,
+        "stdev": 0.0
+      },
+      "decode_step_count": {
+        "ci95_high": 2215.0,
+        "ci95_low": 2215.0,
+        "max": 2215,
+        "mean": 2215.0,
+        "min": 2215,
+        "stdev": 0.0
+      },
+      "decode_step_time_avg_sec": {
+        "ci95_high": 0.027071638561524534,
+        "ci95_low": 0.027071638561524534,
+        "max": 0.027071638561524534,
+        "mean": 0.027071638561524534,
+        "min": 0.027071638561524534,
+        "stdev": 0.0
+      },
+      "decode_step_time_sec": {
+        "ci95_high": 59.963679413776845,
+        "ci95_low": 59.963679413776845,
+        "max": 59.963679413776845,
+        "mean": 59.963679413776845,
+        "min": 59.963679413776845,
+        "stdev": 0.0
+      },
+      "decode_step_time_total_sec": {
+        "ci95_high": 59.963679413776845,
+        "ci95_low": 59.963679413776845,
+        "max": 59.963679413776845,
+        "mean": 59.963679413776845,
+        "min": 59.963679413776845,
+        "stdev": 0.0
+      },
+      "decode_timed_tokens": {
+        "ci95_high": 3792.0,
+        "ci95_low": 3792.0,
+        "max": 3792,
+        "mean": 3792.0,
+        "min": 3792,
+        "stdev": 0.0
+      },
+      "document_recomputed_tokens_est": {
+        "ci95_high": 49664.0,
+        "ci95_low": 49664.0,
+        "max": 49664,
+        "mean": 49664.0,
+        "min": 49664,
+        "stdev": 0.0
+      },
+      "gpu_kv_cache_gb_actual": 7.98046875,
+      "gpu_lru_cached_block_count": {
+        "ci95_high": 224.0,
+        "ci95_low": 224.0,
+        "max": 224,
+        "mean": 224.0,
+        "min": 224,
+        "stdev": 0.0
+      },
+      "gpu_lru_cached_block_peak": {
+        "ci95_high": 226.0,
+        "ci95_low": 226.0,
+        "max": 226,
+        "mean": 226.0,
+        "min": 226,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_cpu_backed_block_count": {
+        "ci95_high": 4702.0,
+        "ci95_low": 4702.0,
+        "max": 4702,
+        "mean": 4702.0,
+        "min": 4702,
+        "stdev": 0.0
+      },
+      "gpu_lru_evicted_gpu_only_block_count": {
+        "ci95_high": 128.0,
+        "ci95_low": 128.0,
+        "max": 128,
+        "mean": 128.0,
+        "min": 128,
+        "stdev": 0.0
+      },
+      "gpu_lru_eviction_count": {
+        "ci95_high": 4830.0,
+        "ci95_low": 4830.0,
+        "max": 4830,
+        "mean": 4830.0,
+        "min": 4830,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_block_count": {
+        "ci95_high": 2723.0,
+        "ci95_low": 2723.0,
+        "max": 2723,
+        "mean": 2723.0,
+        "min": 2723,
+        "stdev": 0.0
+      },
+      "gpu_lru_hit_token_count": {
+        "ci95_high": 697088.0,
+        "ci95_low": 697088.0,
+        "max": 697088,
+        "mean": 697088.0,
+        "min": 697088,
+        "stdev": 0.0
+      },
+      "gpu_prefix_miss_request_count": {
+        "ci95_high": 154.0,
+        "ci95_low": 154.0,
+        "max": 154,
+        "mean": 154.0,
+        "min": 154,
+        "stdev": 0.0
+      },
+      "inactive_cpu_backed_block_count": {
+        "ci95_high": 74.0,
+        "ci95_low": 74.0,
+        "max": 74,
+        "mean": 74.0,
+        "min": 74,
+        "stdev": 0.0
+      },
+      "inactive_gpu_only_block_count": {
+        "ci95_high": 150.0,
+        "ci95_low": 150.0,
+        "max": 150,
+        "mean": 150.0,
+        "min": 150,
+        "stdev": 0.0
+      },
+      "inactive_pending_writeback_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "inactive_safe_or_pending_block_count": {
+        "ci95_high": 74.0,
+        "ci95_low": 74.0,
+        "max": 74,
+        "mean": 74.0,
+        "min": 74,
+        "stdev": 0.0
+      },
+      "lazy_writeback_completed_block_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "lazy_writeback_scheduled_block_count": {
+        "ci95_high": 5013.0,
+        "ci95_low": 5013.0,
+        "max": 5013,
+        "mean": 5013.0,
+        "min": 5013,
+        "stdev": 0.0
+      },
+      "lazy_writeback_target_block_count": {
+        "ci95_high": 40.0,
+        "ci95_low": 40.0,
+        "max": 40,
+        "mean": 40.0,
+        "min": 40,
+        "stdev": 0.0
+      },
+      "max_num_batched_tokens": {
+        "ci95_high": 33152.0,
+        "ci95_low": 33152.0,
+        "max": 33152,
+        "mean": 33152.0,
+        "min": 33152,
+        "stdev": 0.0
+      },
+      "max_num_seqs": {
+        "ci95_high": 8.0,
+        "ci95_low": 8.0,
+        "max": 8,
+        "mean": 8.0,
+        "min": 8,
+        "stdev": 0.0
+      },
+      "measured_workload_profile": {
+        "access_counts": {
+          "0": 10,
+          "1": 18,
+          "10": 13,
+          "11": 23,
+          "12": 6,
+          "13": 10,
+          "14": 9,
+          "15": 9,
+          "16": 15,
+          "17": 9,
+          "2": 14,
+          "3": 12,
+          "4": 20,
+          "5": 19,
+          "6": 16,
+          "7": 15,
+          "8": 16,
+          "9": 18
+        },
+        "realized_working_set_gb": 20.25,
+        "realized_working_set_tokens": 147456,
+        "request_count": 252,
+        "reuse_distance": {
+          "avg": 7.816239316239316,
+          "count": 234,
+          "max": 17,
+          "median": 8.0,
+          "min": 0,
+          "p90": 15.0,
+          "p99": 17.0
+        },
+        "unique_document_count": 18,
+        "working_set_to_gpu_kv_ratio": 2.537444933920705
+      },
+      "model_runner_call_time_sec": {
+        "ci95_high": 68.87437788245734,
+        "ci95_low": 68.87437788245734,
+        "max": 68.87437788245734,
+        "mean": 68.87437788245734,
+        "min": 68.87437788245734,
+        "stdev": 0.0
+      },
+      "num_documents": 18,
+      "offered_rate_realized": {
+        "ci95_high": 1.9824949257090796,
+        "ci95_low": 1.9824949257090796,
+        "max": 1.9824949257090796,
+        "mean": 1.9824949257090796,
+        "min": 1.9824949257090796,
+        "stdev": 0.0
+      },
+      "planned_arrival_span_sec": {
+        "ci95_high": 126.6081424698854,
+        "ci95_low": 126.6081424698854,
+        "max": 126.6081424698854,
+        "mean": 126.6081424698854,
+        "min": 126.6081424698854,
+        "stdev": 0.0
+      },
+      "postprocess_time_sec": {
+        "ci95_high": 0.03065947163850069,
+        "ci95_low": 0.03065947163850069,
+        "max": 0.03065947163850069,
+        "mean": 0.03065947163850069,
+        "min": 0.03065947163850069,
+        "stdev": 0.0
+      },
+      "prefill_model_cuda_sec": {
+        "ci95_high": 9.02484749031066,
+        "ci95_low": 9.02484749031066,
+        "max": 9.02484749031066,
+        "mean": 9.02484749031066,
+        "min": 9.02484749031066,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_count": {
+        "ci95_high": 243.0,
+        "ci95_low": 243.0,
+        "max": 243,
+        "mean": 243.0,
+        "min": 243,
+        "stdev": 0.0
+      },
+      "prefill_model_runner_wall_sec": {
+        "ci95_high": 9.155486797564663,
+        "ci95_low": 9.155486797564663,
+        "max": 9.155486797564663,
+        "mean": 9.155486797564663,
+        "min": 9.155486797564663,
+        "stdev": 0.0
+      },
+      "prefill_prepare_wall_sec": {
+        "ci95_high": 0.06569505960214883,
+        "ci95_low": 0.06569505960214883,
+        "max": 0.06569505960214883,
+        "mean": 0.06569505960214883,
+        "min": 0.06569505960214883,
+        "stdev": 0.0
+      },
+      "prefill_sample_prepare_wall_sec": {
+        "ci95_high": 0.006722652353346348,
+        "ci95_low": 0.006722652353346348,
+        "max": 0.006722652353346348,
+        "mean": 0.006722652353346348,
+        "min": 0.006722652353346348,
+        "stdev": 0.0
+      },
+      "prefill_sampler_wall_sec": {
+        "ci95_high": 1.4176419709110633,
+        "ci95_low": 1.4176419709110633,
+        "max": 1.4176419709110633,
+        "mean": 1.4176419709110633,
+        "min": 1.4176419709110633,
+        "stdev": 0.0
+      },
+      "prefill_step_time_avg_sec": {
+        "ci95_high": 0.055229243982406986,
+        "ci95_low": 0.055229243982406986,
+        "max": 0.055229243982406986,
+        "mean": 0.055229243982406986,
+        "min": 0.055229243982406986,
+        "stdev": 0.0
+      },
+      "prefill_step_time_sec": {
+        "ci95_high": 13.420706287724897,
+        "ci95_low": 13.420706287724897,
+        "max": 13.420706287724897,
+        "mean": 13.420706287724897,
+        "min": 13.420706287724897,
+        "stdev": 0.0
+      },
+      "prefill_step_time_total_sec": {
+        "ci95_high": 13.420706287724897,
+        "ci95_low": 13.420706287724897,
+        "max": 13.420706287724897,
+        "mean": 13.420706287724897,
+        "min": 13.420706287724897,
+        "stdev": 0.0
+      },
+      "prefill_timed_tok_per_sec": {
+        "ci95_high": 5503.138092482628,
+        "ci95_low": 5503.138092482628,
+        "max": 5503.138092482628,
+        "mean": 5503.138092482628,
+        "min": 5503.138092482628,
+        "stdev": 0.0
+      },
+      "prefill_token_count": {
+        "ci95_high": 73856.0,
+        "ci95_low": 73856.0,
+        "max": 73856,
+        "mean": 73856.0,
+        "min": 73856,
+        "stdev": 0.0
+      },
+      "prefix_cache_reused_token_count": {
+        "ci95_high": 828160.0,
+        "ci95_low": 828160.0,
+        "max": 828160,
+        "mean": 828160.0,
+        "min": 828160,
+        "stdev": 0.0
+      },
+      "query_elapsed_sec": {
+        "ci95_high": 127.05052041402087,
+        "ci95_low": 127.05052041402087,
+        "max": 127.05052041402087,
+        "mean": 127.05052041402087,
+        "min": 127.05052041402087,
+        "stdev": 0.0
+      },
+      "query_requests": 252,
+      "queueing_latency_avg": {
+        "ci95_high": 0.011271366022161342,
+        "ci95_low": 0.011271366022161342,
+        "max": 0.011271366022161342,
+        "mean": 0.011271366022161342,
+        "min": 0.011271366022161342,
+        "stdev": 0.0
+      },
+      "queueing_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "queueing_latency_max": {
+        "ci95_high": 0.2309936173260212,
+        "ci95_low": 0.2309936173260212,
+        "max": 0.2309936173260212,
+        "mean": 0.2309936173260212,
+        "min": 0.2309936173260212,
+        "stdev": 0.0
+      },
+      "queueing_latency_median": {
+        "ci95_high": 0.003652999992482364,
+        "ci95_low": 0.003652999992482364,
+        "max": 0.003652999992482364,
+        "mean": 0.003652999992482364,
+        "min": 0.003652999992482364,
+        "stdev": 0.0
+      },
+      "queueing_latency_min": {
+        "ci95_high": 0.00011355045717209578,
+        "ci95_low": 0.00011355045717209578,
+        "max": 0.00011355045717209578,
+        "mean": 0.00011355045717209578,
+        "min": 0.00011355045717209578,
+        "stdev": 0.0
+      },
+      "queueing_latency_p90": {
+        "ci95_high": 0.02463587163947523,
+        "ci95_low": 0.02463587163947523,
+        "max": 0.02463587163947523,
+        "mean": 0.02463587163947523,
+        "min": 0.02463587163947523,
+        "stdev": 0.0
+      },
+      "queueing_latency_p99": {
+        "ci95_high": 0.08135936849401376,
+        "ci95_low": 0.08135936849401376,
+        "max": 0.08135936849401376,
+        "mean": 0.08135936849401376,
+        "min": 0.08135936849401376,
+        "stdev": 0.0
+      },
+      "request_latency_avg": {
+        "ci95_high": 0.5396515973418626,
+        "ci95_low": 0.5396515973418626,
+        "max": 0.5396515973418626,
+        "mean": 0.5396515973418626,
+        "min": 0.5396515973418626,
+        "stdev": 0.0
+      },
+      "request_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "request_latency_max": {
+        "ci95_high": 1.3130041752010584,
+        "ci95_low": 1.3130041752010584,
+        "max": 1.3130041752010584,
+        "mean": 1.3130041752010584,
+        "min": 1.3130041752010584,
+        "stdev": 0.0
+      },
+      "request_latency_median": {
+        "ci95_high": 0.5176765637588687,
+        "ci95_low": 0.5176765637588687,
+        "max": 0.5176765637588687,
+        "mean": 0.5176765637588687,
+        "min": 0.5176765637588687,
+        "stdev": 0.0
+      },
+      "request_latency_min": {
+        "ci95_high": 0.42509943328332156,
+        "ci95_low": 0.42509943328332156,
+        "max": 0.42509943328332156,
+        "mean": 0.42509943328332156,
+        "min": 0.42509943328332156,
+        "stdev": 0.0
+      },
+      "request_latency_p90": {
+        "ci95_high": 0.63481630012393,
+        "ci95_low": 0.63481630012393,
+        "max": 0.63481630012393,
+        "mean": 0.63481630012393,
+        "min": 0.63481630012393,
+        "stdev": 0.0
+      },
+      "request_latency_p99": {
+        "ci95_high": 1.0049289327964672,
+        "ci95_low": 1.0049289327964672,
+        "max": 1.0049289327964672,
+        "mean": 1.0049289327964672,
+        "min": 1.0049289327964672,
+        "stdev": 0.0
+      },
+      "request_rate_target": 2.0,
+      "reusable_prefix_length": 8192,
+      "run_ids": [
+        1
+      ],
+      "runs": 1,
+      "safe_allocatable_block_count": {
+        "ci95_high": 77.0,
+        "ci95_low": 77.0,
+        "max": 77,
+        "mean": 77.0,
+        "min": 77,
+        "stdev": 0.0
+      },
+      "schedule_time_sec": {
+        "ci95_high": 4.461015817243606,
+        "ci95_low": 4.461015817243606,
+        "max": 4.461015817243606,
+        "mean": 4.461015817243606,
+        "min": 4.461015817243606,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_completed_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_d2h_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_h2d_bytes": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_latency_sum": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_planned_request_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_eviction_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_targeted_writeback_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_useful_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wait_wall_sec": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0.0,
+        "mean": 0.0,
+        "min": 0.0,
+        "stdev": 0.0
+      },
+      "scheduler_prefetch_wasted_block_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_future_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_victim_no_visible_next_use_count": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "scheduler_visible_request_count_max": {
+        "ci95_high": 0.0,
+        "ci95_low": 0.0,
+        "max": 0,
+        "mean": 0.0,
+        "min": 0,
+        "stdev": 0.0
+      },
+      "single_prompt_fit_count_est": {
+        "ci95_high": 6.0,
+        "ci95_low": 6.0,
+        "max": 6,
+        "mean": 6.0,
+        "min": 6,
+        "stdev": 0.0
+      },
+      "single_prompt_kv_gb_est": {
+        "ci95_high": 1.140380859375,
+        "ci95_low": 1.140380859375,
+        "max": 1.140380859375,
+        "mean": 1.140380859375,
+        "min": 1.140380859375,
+        "stdev": 0.0
+      },
+      "single_prompt_to_gpu_kv_ratio": {
+        "ci95_high": 0.1428964757709251,
+        "ci95_low": 0.1428964757709251,
+        "max": 0.1428964757709251,
+        "mean": 0.1428964757709251,
+        "min": 0.1428964757709251,
+        "stdev": 0.0
+      },
+      "temperature": 0.0,
+      "ttft_latency_avg": {
+        "ci95_high": 0.06820049745886261,
+        "ci95_low": 0.06820049745886261,
+        "max": 0.06820049745886261,
+        "mean": 0.06820049745886261,
+        "min": 0.06820049745886261,
+        "stdev": 0.0
+      },
+      "ttft_latency_count": {
+        "ci95_high": 252.0,
+        "ci95_low": 252.0,
+        "max": 252,
+        "mean": 252.0,
+        "min": 252,
+        "stdev": 0.0
+      },
+      "ttft_latency_max": {
+        "ci95_high": 0.40825622517149895,
+        "ci95_low": 0.40825622517149895,
+        "max": 0.40825622517149895,
+        "mean": 0.40825622517149895,
+        "min": 0.40825622517149895,
+        "stdev": 0.0
+      },
+      "ttft_latency_median": {
+        "ci95_high": 0.06213440274586901,
+        "ci95_low": 0.06213440274586901,
+        "max": 0.06213440274586901,
+        "mean": 0.06213440274586901,
+        "min": 0.06213440274586901,
+        "stdev": 0.0
+      },
+      "ttft_latency_min": {
+        "ci95_high": 0.03295828332193196,
+        "ci95_low": 0.03295828332193196,
+        "max": 0.03295828332193196,
+        "mean": 0.03295828332193196,
+        "min": 0.03295828332193196,
+        "stdev": 0.0
+      },
+      "ttft_latency_p90": {
+        "ci95_high": 0.08596995724365115,
+        "ci95_low": 0.08596995724365115,
+        "max": 0.08596995724365115,
+        "mean": 0.08596995724365115,
+        "min": 0.08596995724365115,
+        "stdev": 0.0
+      },
+      "ttft_latency_p99": {
+        "ci95_high": 0.2867625712545123,
+        "ci95_low": 0.2867625712545123,
+        "max": 0.2867625712545123,
+        "mean": 0.2867625712545123,
+        "min": 0.2867625712545123,
+        "stdev": 0.0
+      },
+      "warmup_inflight_at_measurement_start": {
+        "ci95_high": 2.0,
+        "ci95_low": 2.0,
+        "max": 2,
+        "mean": 2.0,
+        "min": 2,
+        "stdev": 0.0
+      },
+      "working_set_gb_actual": 20.25,
+      "working_set_to_gpu_kv_ratio": {
+        "ci95_high": 2.537444933920705,
+        "ci95_low": 2.537444933920705,
+        "max": 2.537444933920705,
+        "mean": 2.537444933920705,
+        "min": 2.537444933920705,
+        "stdev": 0.0
+      }
+    }
+  },
+  "validation": {
+    "cpu_physical_budget_ok": true,
+    "cpu_physical_budget_violations": [],
+    "greedy_output_match_ok": true,
+    "output_mismatches": [],
+    "paired_trace_ok": true,
+    "trace_mismatches": []
+  }
+}
