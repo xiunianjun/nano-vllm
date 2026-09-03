@@ -22,6 +22,7 @@ GPU_KV_GB="${GPU_KV_GB:-8.0}"
 MAX_NUM_SEQS="${MAX_NUM_SEQS:-8}"
 PREFILL_BATCH_MULT="${PREFILL_BATCH_MULT:-4}"
 REQUEST_RATE="${REQUEST_RATE:-2.0}"
+ARRIVAL_BURST_SIZE="${ARRIVAL_BURST_SIZE:-1}"
 WARMUP_MODE="${WARMUP_MODE:-stream}"
 STREAM_WARMUP_RATIO="${STREAM_WARMUP_RATIO:-0.3}"
 GPU_WATERMARKS="${GPU_WATERMARKS:-0 0.25 0.5 0.7}"
@@ -68,7 +69,7 @@ MAX_NUM_BATCHED_TOKENS="${MAX_NUM_BATCHED_TOKENS:-$((PREFILL_BATCH_MULT * PROMPT
 mkdir -p "$EXP_DIR"
 
 echo "stage=$SWEEP_STAGE runs=$RUNS run_v2_reference=$RUN_V2_REFERENCE gpu_aware_cpu_eviction=$GPU_AWARE_CPU_EVICTION gpu_watermarks='$WATERMARKS' gpu_target_blocks='$GPU_TARGET_BLOCKS' cpu_limits_gb='$ACTIVE_CPU_LIMITS'"
-echo "hot_documents=$HOT_DOCUMENTS hot_ratio=$HOT_REQUEST_RATIO repeat_count=$HOT_REPEAT_COUNT"
+echo "hot_documents=$HOT_DOCUMENTS hot_ratio=$HOT_REQUEST_RATIO repeat_count=$HOT_REPEAT_COUNT arrival_burst_size=$ARRIVAL_BURST_SIZE"
 
 COMMON_ARGS=(
   --model "$MODEL"
@@ -81,9 +82,11 @@ COMMON_ARGS=(
   --max-num-batched-tokens "$MAX_NUM_BATCHED_TOKENS"
   --arrival-mode poisson
   --request-rate "$REQUEST_RATE"
+  --arrival-burst-size "$ARRIVAL_BURST_SIZE"
   --warmup-mode "$WARMUP_MODE"
   --stream-warmup-ratio "$STREAM_WARMUP_RATIO"
   --temperature 0
+  --no-enable-scheduler-aware-prefetch
   --enforce-eager
   --no-use-tqdm
 )

@@ -32,7 +32,9 @@ HOT_REQUEST_RATIO="${HOT_REQUEST_RATIO:-0.7}"
 HOT_REPEAT_COUNT="${HOT_REPEAT_COUNT:-4}"
 MODES="${MODES:-baseline v1 v2 v3 v4}"
 LAZY_WRITEBACK_TARGET_BLOCKS="${LAZY_WRITEBACK_TARGET_BLOCKS:-40}"
-CPU_PREFIX_CACHE_GB_LIMIT="${CPU_PREFIX_CACHE_GB_LIMIT:-15}"
+# V1/V2 的 eager backing 保留完整 working set；V3/V4 使用已选出的内存边界。
+EAGER_CPU_PREFIX_CACHE_GB_LIMIT="${EAGER_CPU_PREFIX_CACHE_GB_LIMIT:-0}"
+LAZY_CPU_PREFIX_CACHE_GB_LIMIT="${LAZY_CPU_PREFIX_CACHE_GB_LIMIT:-15}"
 ROOT_LEN="${ROOT_LEN:-$((DOC_LEN / 2))}"
 BRANCH_LEN="${BRANCH_LEN:-$((DOC_LEN - ROOT_LEN))}"
 PROMPT_LEN="$((DOC_LEN + QUERY_LEN))"
@@ -70,13 +72,13 @@ run_once() {
     offload_args=(
       --enable-cpu-kv-offload
       --no-enable-gpu-lru-retention
-      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+      --cpu-prefix-cache-gb-limit "$EAGER_CPU_PREFIX_CACHE_GB_LIMIT"
     )
   elif [[ "$mode" == "v2" ]]; then
     offload_args=(
       --enable-cpu-kv-offload
       --enable-gpu-lru-retention
-      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+      --cpu-prefix-cache-gb-limit "$EAGER_CPU_PREFIX_CACHE_GB_LIMIT"
     )
   elif [[ "$mode" == "v3" ]]; then
     offload_args=(
@@ -84,7 +86,7 @@ run_once() {
       --enable-gpu-lru-retention
       --enable-lazy-cpu-kv-writeback
       --lazy-writeback-target-blocks "$LAZY_WRITEBACK_TARGET_BLOCKS"
-      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+      --cpu-prefix-cache-gb-limit "$LAZY_CPU_PREFIX_CACHE_GB_LIMIT"
     )
   elif [[ "$mode" == "v4" ]]; then
     offload_args=(
@@ -93,7 +95,7 @@ run_once() {
       --enable-lazy-cpu-kv-writeback
       --enable-scheduler-aware-prefetch
       --lazy-writeback-target-blocks "$LAZY_WRITEBACK_TARGET_BLOCKS"
-      --cpu-prefix-cache-gb-limit "$CPU_PREFIX_CACHE_GB_LIMIT"
+      --cpu-prefix-cache-gb-limit "$LAZY_CPU_PREFIX_CACHE_GB_LIMIT"
     )
   fi
   # The two seeds are paired across modes, while each independent run gets a new trace.
@@ -180,6 +182,7 @@ keys = [
     "lazy_writeback_scheduled_block_count",
     "lazy_writeback_completed_block_count",
     "scheduler_visible_request_count_max",
+    "scheduler_lookahead_touch_block_count",
     "scheduler_prefetch_planned_request_count",
     "scheduler_prefetch_planned_block_count",
     "scheduler_prefetch_completed_block_count",
@@ -189,8 +192,8 @@ keys = [
     "scheduler_prefetch_targeted_writeback_count",
     "scheduler_prefetch_wait_count",
     "scheduler_prefetch_wait_wall_sec",
-    "scheduler_victim_no_visible_next_use_count",
-    "scheduler_victim_future_next_use_count",
+    "scheduler_prefetch_capacity_rejected_request_count",
+    "scheduler_prefetch_no_cpu_target_count",
     "scheduler_prefetch_h2d_bytes",
     "scheduler_prefetch_d2h_bytes",
     "scheduler_prefetch_latency_sum",

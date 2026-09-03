@@ -253,7 +253,7 @@ class SchedulerAwarePrefetchTests(unittest.TestCase):
     def tearDown(self):
         Sequence.block_size = self.old_block_size
 
-    def test_visible_next_use_changes_victim_order_and_pending_slot_state(self):
+    def test_lookahead_touch_keeps_next_gpu_prefix_and_replacement_uses_lru(self):
         manager = BlockManager(2, 4)
         visible = Sequence([1, 2, 3, 4, 9])
         visible_hash = visible.block_hash(0)
@@ -268,8 +268,8 @@ class SchedulerAwarePrefetchTests(unittest.TestCase):
             manager.inactive_block_ids[block_id] = None
             manager.evictable_inactive_block_count += 1
 
-        manager.update_victim_order([visible])
-        self.assertEqual(manager.victim_order, [1, 0])
+        manager.touch_inactive_blocks([0])
+        self.assertEqual(manager.ordered_inactive_block_ids(), [1, 0])
 
         target = Sequence([10, 11, 12, 13, 9])
         target_hash = target.block_hash(0)
@@ -288,14 +288,15 @@ class SchedulerAwarePrefetchTests(unittest.TestCase):
         manager._activate_inactive_block(1)
         self.assertEqual(manager.metrics["scheduler_prefetch_useful_block_count"], 1)
 
-    def test_opt_victim_order_is_scoped_to_replacement_planning(self):
-        manager = BlockManager(2, 4)
-        visible = Sequence([1, 2, 3, 4, 9])
-        visible_hash = visible.block_hash(0)
-        cold_hash = Sequence.compute_hash([5, 6, 7, 8])
+    def test_n_plus_one_is_hotter_than_n_plus_two(self):
+        manager = BlockManager(3, 4)
+        first = Sequence([1, 2, 3, 4, 9])
+        second = Sequence([5, 6, 7, 8, 9])
+        cold_hash = Sequence.compute_hash([10, 11, 12, 13])
         for block_id, h, tokens in (
-            (0, visible_hash, [1, 2, 3, 4]),
-            (1, cold_hash, [5, 6, 7, 8]),
+            (0, first.block_hash(0), first.block_token_ids(0)),
+            (1, second.block_hash(0), second.block_token_ids(0)),
+            (2, cold_hash, [10, 11, 12, 13]),
         ):
             manager.free_block_ids.remove(block_id)
             manager.blocks[block_id].update(h, tokens)
@@ -305,42 +306,78 @@ class SchedulerAwarePrefetchTests(unittest.TestCase):
 
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.enable_scheduler_aware_prefetch = True
-        scheduler.waiting = deque([visible])
-        scheduler.max_num_seqs = 1
+        scheduler.waiting = deque([first, second])
+        scheduler.max_num_seqs = 8
         scheduler.metrics = defaultdict(int)
         scheduler.block_manager = manager
 
-        # OPT 规划会保留马上使用的 block 0，选 block 1 做 replacement victim。
-        def inspect_opt_order():
-            self.assertEqual(manager.ordered_inactive_block_ids(), [1, 0])
+        def inspect_lru_order(_visible, _decode_reserve):
+            self.assertEqual(manager.ordered_inactive_block_ids(), [2, 1, 0])
             return 0, 0
 
-        scheduler._start_v4_prefetch = inspect_opt_order
-        scheduler._plan_v4_prefetch()
+        scheduler._start_v4_prefetch = inspect_lru_order
+        scheduler._plan_v4_prefetch([first, second], 0)
 
-        # 规划阶段结束后恢复原 LRU。普通 demand allocation 依然先驱逐 block 0，
-        # 不会为了严格执行 OPT 而在关键路径上等待 GPU-only victim 写回。
-        self.assertEqual(manager.ordered_inactive_block_ids(), [0, 1])
-        self.assertEqual(manager._allocate_block(), 0)
+        # V3/V4 都使用这一个 LRU backend；V4 只把即将使用的 block touch 到热端。
+        self.assertEqual(manager._allocate_block(), 2)
 
-    def test_prefetch_admits_only_requests_whose_full_allocation_fits(self):
-        manager = BlockManager(2, 4)
-        first = Sequence([1, 2, 3, 4, 9])
-        second = Sequence([5, 6, 7, 8, 9])
+    def test_prefetch_accepts_a_partial_n_plus_one_prefix(self):
+        manager = BlockManager(1, 4)
+        first = Sequence([1, 2, 3, 4, 5, 6, 7, 8, 9])
         manager.register_cpu_metadata(first.block_hash(0), first.block_token_ids(0))
-        manager.register_cpu_metadata(second.block_hash(0), second.block_token_ids(0))
+        manager.register_cpu_metadata(first.block_hash(1), first.block_token_ids(1))
 
         scheduler = Scheduler.__new__(Scheduler)
-        scheduler.waiting = deque([first, second])
+        scheduler.waiting = deque([first])
         scheduler.max_num_seqs = 8
         scheduler.scheduler_prefetch_max_blocks = 0
         scheduler.block_manager = manager
+        scheduler.metrics = defaultdict(int)
 
         planned_requests, targets, protected = scheduler._make_v4_prefetch_plan()
 
         self.assertEqual(planned_requests, 1)
         self.assertEqual(targets, [(first.block_hash(0), first.block_token_ids(0))])
         self.assertEqual(protected, set())
+        self.assertEqual(scheduler.metrics["scheduler_prefetch_capacity_rejected_request_count"], 1)
+
+    def test_decode_reserve_can_disable_opportunistic_prefetch(self):
+        manager = BlockManager(1, 4)
+        seq = Sequence([1, 2, 3, 4, 9])
+        manager.register_cpu_metadata(seq.block_hash(0), seq.block_token_ids(0))
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([seq])
+        scheduler.max_num_seqs = 8
+        scheduler.scheduler_prefetch_max_blocks = 0
+        scheduler.block_manager = manager
+        scheduler.metrics = defaultdict(int)
+
+        planned, targets, _protected = scheduler._make_v4_prefetch_plan(decode_reserve=1)
+
+        self.assertEqual(planned, 0)
+        self.assertEqual(targets, [])
+        self.assertEqual(scheduler.metrics["scheduler_prefetch_capacity_rejected_request_count"], 1)
+
+    def test_pending_prefix_is_not_planned_twice(self):
+        manager = BlockManager(2, 4)
+        seq = Sequence([1, 2, 3, 4, 5, 6, 7, 8, 9])
+        first_hash = seq.block_hash(0)
+        second_hash = seq.block_hash(1)
+        manager.pending_prefetch_hashes[first_hash] = 0
+        manager.free_block_ids.remove(0)
+        manager.blocks[0].replacement_pending = True
+        manager.register_cpu_metadata(second_hash, seq.block_token_ids(1))
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([seq])
+        scheduler.max_num_seqs = 8
+        scheduler.scheduler_prefetch_max_blocks = 0
+        scheduler.block_manager = manager
+        scheduler.metrics = defaultdict(int)
+
+        _planned, targets, _protected = scheduler._make_v4_prefetch_plan()
+
+        self.assertEqual(targets, [(second_hash, seq.block_token_ids(1))])
 
 
 class _BlockManagerStub:
@@ -378,6 +415,35 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
 
         self.assertEqual(accepted, 1)
         self.assertEqual(captured, [([(11, 3)], None, None)])
+
+    def test_v3_writeback_uses_configured_cpu_eviction_protection(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_lazy_cpu_kv_writeback = True
+        scheduler.enable_gpu_aware_cpu_eviction = True
+        scheduler.lazy_writeback_target_blocks = 80
+        hint_calls = []
+        scheduler.block_manager = SimpleNamespace(
+            gpu_residency_for_cpu_eviction=lambda window: (
+                hint_calls.append(window) or ({11, 12}, {11})
+            ),
+            mark_cpu_writeback_pending=lambda _entries: None,
+        )
+        scheduler.pending_prefix_writebacks = {}
+        scheduler.pending_writeback_by_block_id = {}
+        scheduler.pending_writeback_by_hash = {}
+        scheduler.metrics = defaultdict(int)
+        scheduler.writeback_prefix_blocks = lambda _entries, _preferred, _protected: {
+            "writeback_ids": [7],
+            "evicted_hashes": [],
+        }
+
+        scheduler._submit_prefix_writeback_entries(
+            [(13, 3, [1, 2, 3, 4])],
+            release_on_complete=False,
+            lazy=True,
+        )
+
+        self.assertEqual(hint_calls, [80])
 
     def test_absolute_lazy_writeback_target_overrides_derived_window(self):
         base = dict(
@@ -451,6 +517,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler.block_manager = block_manager
         scheduler.restore_prefix_blocks = lambda entries: events.append(("restore", entries))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append(("maintain", None))
+        scheduler._prepare_v4_prefetch = lambda _seqs: None
         scheduler._poll_prefix_writebacks = lambda wait=False: None
         scheduler.metrics = defaultdict(int)
 
@@ -459,6 +526,36 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         self.assertTrue(is_prefill)
         self.assertEqual(scheduled, [seq])
         self.assertEqual([name for name, _ in events], ["restore", "maintain"])
+
+    def test_v3_after_allocation_maintains_the_fixed_window(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_lazy_cpu_kv_writeback = True
+        scheduler.lazy_writeback_target_blocks = 80
+        scheduler.block_manager = SimpleNamespace(free_block_count=lambda: 0)
+        scheduler.metrics = defaultdict(int)
+        calls = []
+        scheduler._maintain_lazy_writeback_window = lambda limit=None: calls.append(limit)
+
+        scheduler._maintain_lazy_writeback_window_after_allocation()
+
+        self.assertEqual(calls, [None])
+        self.assertEqual(scheduler.metrics["lazy_writeback_after_alloc_trigger_count"], 1)
+
+    def test_v4_prefetch_is_followed_by_the_same_v3_window_check(self):
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_scheduler_aware_prefetch = True
+        scheduler.waiting = deque()
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 8
+        scheduler.block_size = 4
+        scheduler.metrics = defaultdict(int)
+        events = []
+        scheduler._plan_v4_prefetch = lambda _visible, _reserve: events.append("prefetch")
+        scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
+
+        scheduler._prepare_v4_prefetch([])
+
+        self.assertEqual(events, ["prefetch", "v3_window"])
 
 
 if __name__ == "__main__":
