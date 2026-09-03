@@ -8,7 +8,9 @@
 >
 > 当前 V4 单-seed burst=4 对照：`exp/v4_prefetch_burst4_w80_cpu19_run1_20260903_1020/`
 >
-> 当前主结论只覆盖 `hot_cold_sharing`；旧实验结果已全部清除。
+> 当前 V2 / V2+V4 单-seed burst=4 对照：`exp/v2_v2v4_burst4_unlimited_run1_20260903_103722/`
+>
+> 当前实验结论只覆盖 hot/cold workload；smooth 与 burst=4 分开报告，历史有效结果继续保留。
 
 ## 1. 项目目标
 
@@ -33,8 +35,9 @@ GPU miss + CPU miss  -> 正常 prefill / recompute
 | GPU-only baseline | 否 | 是 | 无 | GPU miss 后重新计算 prefix |
 | V1 | 是 | 否 | eager，全量 | 验证 CPU backing/restore 的基础收益 |
 | V2 | 是 | 是 | eager，全量 | 用 GPU LRU 减少 V1 的同步 H2D restore |
-| V3 | 是 | 是 | lazy，按水位选择 | 在 V2 基础上探索 CPU memory/latency tradeoff |
-| V4 | 是 | 是，调度感知 touch | lazy + 定向 replacement | 利用当前计算预取下一个 FCFS 请求的 prefix |
+| V3（`v3` = V2+V3） | 是 | 是 | lazy，按水位选择 | 在 V2 基础上探索 CPU memory/latency tradeoff |
+| V2+V4（`v2_v4`） | 是 | 是，调度感知 touch | eager 全量 + 定向 prefetch | 隔离评估 V4 预取，不开 V3 |
+| V4（`v4` = V2+V3+V4） | 是 | 是，调度感知 touch | lazy + 定向 replacement | 同时获得 V3 内存节省和 V4 预取 |
 
 重要口径：当前脚本中的 `baseline` 实际参数是 `--no-enable-cpu-kv-offload --enable-gpu-lru-retention`，所以它是 **GPU-only LRU baseline**，不是“关闭所有 cache 的纯 recompute baseline”。原始 JSON 的 `mode=gpu_prefix_cache_recompute_baseline` 只是遗留名称，分析时不得据此误判。
 
@@ -78,9 +81,9 @@ target_free   = target_blocks * (1 + lazy_writeback_watermark_ratio)
 
 GPU sweep 期间 CPU cap 保持为 `0`（unlimited），当前选出的 GPU watermark 为绝对值 `40 blocks`。它是当前 workload 下未发生 GPU-only eviction 的最小已测点；若需要为不同 seed 或 batch 波动留保守余量，可使用 `60 blocks`。当前实现始终维护配置的固定 watermark，不预测下一轮 batch，也不动态扩大窗口。
 
-### V4 最终方案：保留 V3，只增加调度感知 Prefetch
+### V4 最终方案：与 V3 解耦的调度感知 Prefetch
 
-V4 完整继承 V3 的 allocation、LRU eviction、lazy writeback、GPU safety window 和 CPU hard cap。V3 仍在每次真实 allocation 后补固定安全窗口，不能挪到 scheduler tick 末。V4 不实现 OPT/next-use victim selector，只在当前 batch allocation 完成后查看 FCFS waiting queue，增加 touch 和部分 prefetch。
+V3 和 V4 现在是正交开关。V3 仍在每次真实 allocation 后补固定安全窗口，不能挪到 scheduler tick 末；V4 不实现 OPT/next-use victim selector，只在当前 batch allocation 完成后查看 FCFS waiting queue，增加 touch 和部分 prefetch。因此可以分别运行 V2、V2+V3、V2+V4 和 V2+V3+V4。
 
 #### 核心决策
 
@@ -88,20 +91,20 @@ V4 完整继承 V3 的 allocation、LRU eviction、lazy writeback、GPU safety w
 - prefix 已在 GPU：按 N+2、N+1 的顺序 touch，使 N+1 位于 LRU 热端。touch 只是 retention hint，不新增另一套 eviction 算法。
 - prefix 在 CPU：按请求内从前到后预取能放下的部分 blocks，不要求整个请求都能放下。GPU-resident、`PREFETCH_PENDING` 和本 tick 已规划的相同 hash 都跳过，不重复提交。
 - prefetch block budget 为当前可分配 slots 减去精确 decode reserve，再受 `scheduler_prefetch_max_blocks` 限制；0 表示不设额外传输上限。
-- 预取先用 free slot，不足时按 V3 的普通 LRU 一进一出。active、writeback pending、replacement pending 和已 touch/protected 的 visible blocks 不可作为 victim。
-- touch/prefetch 后再调用一次原 V3 固定安全窗口维护；下一轮每次 demand allocation 后仍照常调用 V3 维护。
+- 预取先用 free slot，不足时按现有 GPU LRU 一进一出。active、writeback pending、replacement pending 和已 touch/protected 的 visible blocks 不可作为 victim。
+- 若同时开启 V3，且 prefetch 确实占用了 GPU slot，则再调用一次原 V3 逻辑补回固定安全窗口。只 touch 或纯 V2+V4 都不运行这一步。
 
 #### 每轮调度时序
 
 ```text
 1. tick 开头非阻塞收割已完成的 writeback/prefetch events
-2. 逐个进行本轮 demand allocation；每次 allocation 后按原 V3 逻辑补固定安全窗口
+2. 逐个进行本轮 demand allocation；若开启 V3，每次 allocation 后按原 V3 逻辑补固定安全窗口
 3. batch allocation 完成后，V4 touch N+1/N+2，并提交有限的部分 prefetch
-4. prefetch 后再按原 V3 逻辑检查一次固定安全窗口
+4. 若开启 V3 且第 3 步实际占用了 slot，再检查一次固定安全窗口
 5. 启动当前 batch 计算，与异步 copy 重叠
 ```
 
-V3 与 V4 的 demand 路径相同。区别仅发生在第 3/4 步，因此 burst 中同一 tick 连续 allocation 多个请求时，仍会在请求之间及时补安全窗口。
+V2+V3+V4 的 demand 路径与 V3 相同；V2+V4 的 demand 路径与 V2 相同。V4 只在其后追加第 3/4 步，不改变原 backend 的 writeback 时机。
 
 #### 异步与状态
 
@@ -125,7 +128,7 @@ Python 立即返回，运行当前 batch
 
 同一 CUDA stream 自动保证 D2H 先于 H2D。B 已有 CPU backing 时省略 D2H。只有 FCFS 队头依赖未完成的 E 时才等待一次并记录 late-prefetch stall；不新增后台线程或主动轮询循环。
 
-- `WRITEBACK_PENDING`：V3 后台备份；完成前 GPU KV 有效且不可覆盖，完成后增加 CPU backing但不释放 GPU block。
+- `WRITEBACK_PENDING`：V2 eager 或 V3 lazy 的异步备份；完成前 GPU KV 有效且不可覆盖，完成后增加 CPU backing。
 - `REPLACEMENT_PENDING`：victim slot 已预留，event 完成前不能再次分配。
 - `PREFETCH_PENDING`：目标 prefix 正在 H2D，event 完成前不能算 GPU hit。
 - 已提交 replacement 不因窗口变化取消；未提交计划每 tick 重算。event 完成后一次性更新 CPU/GPU metadata。
@@ -138,9 +141,9 @@ Python 立即返回，运行当前 batch
 
 #### V4 当前实现状态（2026-09-03）
 
-当前代码已按上述收敛方案实现：BlockManager 只保留一套 LRU victim 顺序；V3 恢复逐 allocation、固定 watermark 的原始逻辑；V4 只追加 N+1/N+2 touch、部分 prefetch 和预取后的安全窗口检查。ModelRunner 继续使用已有的单 `copy_stream` 和 final event，无需新增线程或 Python polling loop。
+当前代码已按上述收敛方案实现：BlockManager 只保留一套 LRU victim 顺序；V3 保留逐 allocation、固定 watermark 的原始逻辑；V4 只追加 N+1/N+2 touch 和部分 prefetch。V3 lazy writeback 和 V4 scheduler-aware prefetch 由独立 policy 位控制，可运行 V2+V4，也可运行 V2+V3+V4。ModelRunner 继续使用已有的单 `copy_stream` 和 final event，无需新增线程或 Python polling loop。
 
-Benchmark 使用 `cpu_prefix_cache_v4_scheduler_aware`、`--enable-scheduler-aware-prefetch` 和 `--scheduler-prefetch-max-blocks`。`.venv-fa28/bin/python -m unittest discover -s tests -q` 当前 31 个测试全部通过。收敛方案的首轮主 GPU 对照已经完成，结果见下方“当前收敛版”小节；单 seed 只用于开发判断，尚不是最终性能结论。
+Benchmark 模式映射为：`v2`=V2、`v3`=V2+V3、`v2_v4`=V2+V4、`v4`=V2+V3+V4。V2+V4 的 JSON mode 为 `cpu_prefix_cache_v2_v4_scheduler_aware`。`.venv-fa28/bin/python -m unittest discover -s tests -q` 当前 33 个测试全部通过。收敛方案的单-seed GPU 对照见下方；它们只用于开发判断，尚不是最终性能结论。
 
 #### 旧版 V4 copy-path 功能验证（历史记录）
 
@@ -194,6 +197,19 @@ burst 确实产生了 V4 可见窗口：`visible_request_count_sum=250`、max `6
 V4 计划并完成 198 个 block prefetch，useful/wasted=`198/0`，同步等待为 0；同步 swapin 比 V3 少 187 blocks（`-3.94%`），GPU hits 恰好增加 187。V4 的 GPU-only eviction 仍为 51，与 V3 完全相同；recompute 也同为 33,024 tokens，证明当前方案保留了 V3 的安全窗口语义，没有重现旧 V4/动态窗口版本的回归。
 
 本轮可见 waiting 请求累计 117、单 tick 最大 2；发生 80 次 capacity rejection，含义是对应 tick 的 N+1 CPU target 只能部分预取或没有剩余保守预算，并非 80 个唯一请求失败。198 个 prefetch 全部通过普通 LRU replacement 完成，H2D 约 6.96 GiB，没有额外 D2H（victim 已有 CPU backing）。V4 scheduler 总时间比 V3 多约 0.238s，单 seed 延迟呈混合波动：median request `+0.25%`、p90 `-0.79%`、p99 `+1.55%`，不能据此宣称端到端加速。当前结论是机制有效且不破坏 V3；是否有稳定延迟收益需要补多 seed，或进一步收紧预取预算后再做配对实验。原始结果保存在 `exp/v4_prefetch_burst4_w80_cpu19_run1_20260903_1020/`。
+
+#### 解耦后 V2 / V2+V4 burst=4 单-seed 对照
+
+使用上述相同 burst workload 和 seed 1，只跑 V2 与 V2+V4。两者都使用 V2 eager CPU backing，`cpu_prefix_cache_gb_limit=0`（unlimited）；V2+V4 没有开启 V3，所以 GPU watermark 和 CPU 19 GiB cap 均不适用。trace SHA256 均为 `ec63314d...`，output SHA256 均为 `f1fd9331...`，三项 benchmark 校验全部通过。
+
+| mode | median req | p90 req | p99 req | median TTFT | p90 TTFT | p99 TTFT | prefill total | sync swapin blocks |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|
+| V2 | 0.555s | 0.727s | 1.159s | 0.110s | 0.157s | 0.700s | 6.426s | 4,805 |
+| V2+V4 | 0.545s | 0.637s | 1.108s | 0.110s | 0.139s | 0.675s | 6.202s | 4,607 |
+
+V2+V4 计划/完成/有用/浪费 prefetch 为 `198/198/198/0` blocks，GPU hits 恰好增加 198（`3,227 -> 3,425`），sync swapin 恰好减少 198（`-4.12%`）。prefetch H2D 为 6.96 GiB，但两个模式的总 H2D 均为 168.93 GiB：V4 没有减少搬运量，而是把这 198 个 block 从 demand 关键路径移到了可与计算重叠的 prefetch。`targeted_writeback=0`、`prefetch_wait=0`，lazy target/scheduled/maintain 全为 0，证明 V2+V4 实际走的是 eager backing + prefetch，不是隐式启用 V3。
+
+单 seed 下，V2+V4 相对 V2 的 median/p90/p99 request 分别降低 `1.94%/12.36%/4.36%`，p90/p99 TTFT 降低 `11.58%/3.55%`，prefill 降低 `3.48%`。这比 V2+V3+V4 的单-seed 混合波动更积极，支持“V4 预取本身有效，V3 的内存约束/迁移会影响其端到端表现”这一开发阶段判断；由于只有一个 seed，尚不能声称稳定加速。原始结果保存在 `exp/v2_v2v4_burst4_unlimited_run1_20260903_103722/`。
 
 ## 3. 已完成的工程优化
 
@@ -446,6 +462,7 @@ CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomput
 3. V3 GPU 安全窗口在当前 workload 下可从保守推导值 130 blocks 缩至 40 blocks；30 blocks 已出现 GPU-only eviction，因此不能继续缩小 request-level 安全窗口。
 4. 16 GiB 下 GPU-aware CPU LRU 将 duplicate 从 199 降至 103、unique coverage 从 480 提至完整的 576 blocks，并用更多 H2D 换取更少 recompute；但迁移 churn 与 GPU-only eviction 同时上升，尚需进一步约束。
 5. 按 recompute、prefill 和 TTFT 共同确定的实用性能边界，Naive V3 为 19 GiB，GPU-aware V3 为 15 GiB：去重策略再节省 4 GiB（21.1%），最新 V3 相比 V2 的 20.25 GiB 共节省 5.25 GiB（25.9%）。
+6. V4 prefetch 已与 V3 lazy writeback 解耦。burst=4 的单-seed V2/V2+V4 对照中，198 个 prefetch 全部有用且无等待，将 sync swapin 降低 4.12%；延迟结果积极，但仍需多 seed 确认。
 
 建议后续按优先级进行：
 
@@ -455,11 +472,11 @@ CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomput
 4. 增加 request-rate sweep，直到接近饱和，分别报告 offered load、achieved throughput、queueing 和 tail latency。
 5. profile offload 模式较高的 decode time，拆分 model runner、transfer 和 scheduler 干扰。
 6. 如需“纯 recompute”对照，新增同时关闭 CPU offload 和 GPU LRU 的独立模式，并给现有 baseline 重命名，避免口径混淆。
-7. 最终结果至少增加到 5 个 seeds，并保留 raw per-run 数据、paired ratios 和 Student-t CI。
+7. 对 V2/V2+V4 和 V2+V3/V2+V3+V4 分别补至少 5 个 seeds，分开报告纯预取收益与叠加内存约束后的收益，并保留 raw per-run 数据、paired ratios 和 Student-t CI。
 
 ## 9. 结果保留策略
 
-`exp/` 下旧实验、旧图表、旧 summary 和无效中断 campaign 已于 2026-09-02 全部清除。当前只保留：
+`exp/` 下 2026-09-02 以前的废弃实验、旧图表、旧 summary 和无效中断 campaign 已清除。当前保留的有效结果包括：
 
 ```text
 exp/prefix_cache_hotset12_20260902_110808/
@@ -474,6 +491,11 @@ exp/v3_cpu_gpuaware_8gb_20260902_153724/
 exp/v3_cpu_gpuaware_14gb_20260902_154300/
 exp/v3_cpu_gpuaware_15gb_20260902_154712/
 exp/v3_cpu_naive_boundary_20260902_160124/
+exp/v4_main_smooth_run1_20260902_204335/
+exp/v4_main_burst4_w80_cpu19_run1_20260902_221035/
+exp/v4_redesign_burst4_w80_cpu19_run1_20260903_1843/
+exp/v4_prefetch_burst4_w80_cpu19_run1_20260903_1020/
+exp/v2_v2v4_burst4_unlimited_run1_20260903_103722/
 ```
 
-其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是主实验分析入口；GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；CPU 目录保留 GPU-aware 8/14/15/16 GiB sweep 与 Naive V3 18/19/20 GiB 边界数据。后续实验必须使用新的时间戳目录，不覆盖已有结果。
+其中 `prefix_cache_hotset12_20260902_110808/hot_cold_sharing/summary.json` 是原 V1/V2/V3 主实验分析入口；`v2_v2v4_burst4_unlimited_run1_20260903_103722/hot_cold_burst/summary.json` 是当前隔离 V4 预取效果的入口。GPU block sweep 的 130/60/40/30/10 原始结果分别保存在上述 GPU sweep 目录；CPU 目录保留 GPU-aware 8/14/15/16 GiB sweep 与 Naive V3 18/19/20 GiB 边界数据。后续实验必须使用新的时间戳目录，不覆盖已有结果。
