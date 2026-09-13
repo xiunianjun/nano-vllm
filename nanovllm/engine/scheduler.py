@@ -13,7 +13,7 @@ class PendingPrefixWriteback:
     prefix_hash: int
     block_id: int
     token_ids: list[int]
-    release_on_complete: bool
+    pending_release_count: int
     lazy: bool
 
 
@@ -332,11 +332,12 @@ class Scheduler:
 
     def _mark_pending_writeback_release(self, block_ids: list[int]):
         # request finish/preempt 时，如果某些 block 还在 D2H pending，
-        # 不能立刻 release；只把 pending 记录标成“完成后再释放”。
+        # 不能立刻 release；记录完成后需要释放的引用数。共享 prefix 的每个
+        # request 都持有一份引用，因此不能只用一个 bool。
         for block_id in block_ids:
             writeback_id = self.pending_writeback_by_block_id.get(block_id)
             if writeback_id is not None:
-                self.pending_prefix_writebacks[writeback_id].release_on_complete = True
+                self.pending_prefix_writebacks[writeback_id].pending_release_count += 1
 
     def _decode_tail_tokens_without_prefix_backing(self, seq: Sequence) -> int:
         # V1 invariant: prompt prefill 完成后，完整 prefix blocks 已经 CPU_RESIDENT 或 WRITEBACK_PENDING。
@@ -374,7 +375,7 @@ class Scheduler:
         self.block_manager.mark_cpu_writeback_pending(accepted_entries)
         for writeback_id, entry in zip(writeback_ids, accepted_entries):
             h, block_id, token_ids = entry
-            pending = PendingPrefixWriteback(h, block_id, token_ids, release_on_complete, lazy)
+            pending = PendingPrefixWriteback(h, block_id, token_ids, int(release_on_complete), lazy)
             self.pending_prefix_writebacks[writeback_id] = pending
             self.pending_writeback_by_block_id[block_id] = writeback_id
             self.pending_writeback_by_hash[h] = writeback_id
@@ -501,7 +502,7 @@ class Scheduler:
             self.block_manager.register_cpu_blocks([entry])
             if pending.lazy:
                 self.metrics["lazy_writeback_completed_block_count"] += 1
-            if pending.release_on_complete:
+            for _ in range(pending.pending_release_count):
                 self.block_manager.release_blocks([pending.block_id])
         if evicted_hashes:
             self.block_manager.unregister_cpu_blocks(evicted_hashes)
@@ -572,18 +573,6 @@ class Scheduler:
                 cacheable_prefix_blocks = max(seq.num_blocks - 1, 0)
                 # GPU hit 和 CPU hit 都可以跳过对应 prefix prefill；区别是 CPU hit 需要先 H2D restore。
                 num_tokens = seq.num_tokens - num_cached_blocks * self.block_size
-                self.metrics["prefix_cache_lookup_count"] += 1
-                if gpu_hits < cacheable_prefix_blocks:
-                    self.metrics["gpu_prefix_miss_request_count"] += 1
-                self.metrics["prefix_cache_reused_token_count"] += gpu_hits * self.block_size
-                self.metrics["cpu_prefix_cache_hit_count"] += cpu_hits
-                self.metrics["cpu_prefix_cache_restored_token_count"] += cpu_hits * self.block_size
-                if cpu_hits:
-                    # 这里统计的是关键路径上的 demand sync swapin：GPU miss、CPU hit，且必须立刻 H2D 才能继续 prefill。
-                    # V3 如果提前 prefetch 成功，request 到这里应表现为 GPU hit，不能再计入 sync_swapin。
-                    self.metrics["cpu_sync_swapin_request_count"] += 1
-                    self.metrics["cpu_sync_swapin_block_count"] += cpu_hits
-                    self.metrics["cpu_sync_swapin_token_count"] += cpu_hits * self.block_size
             else:
                 plan = None
                 num_tokens = seq.num_tokens - seq.num_cached_tokens
@@ -594,6 +583,17 @@ class Scheduler:
                 if restore_entries:
                     assert self.restore_prefix_blocks is not None
                     self.restore_prefix_blocks(restore_entries) # 同步 H2D 后再继续 prefill 剩余 suffix。
+                # 只统计本轮真正完成分配和 restore、即将进入 batch 的请求。
+                self.metrics["prefix_cache_lookup_count"] += 1
+                if gpu_hits < cacheable_prefix_blocks:
+                    self.metrics["gpu_prefix_miss_request_count"] += 1
+                self.metrics["prefix_cache_reused_token_count"] += gpu_hits * self.block_size
+                self.metrics["cpu_prefix_cache_hit_count"] += cpu_hits
+                self.metrics["cpu_prefix_cache_restored_token_count"] += cpu_hits * self.block_size
+                if cpu_hits:
+                    self.metrics["cpu_sync_swapin_request_count"] += 1
+                    self.metrics["cpu_sync_swapin_block_count"] += cpu_hits
+                    self.metrics["cpu_sync_swapin_token_count"] += cpu_hits * self.block_size
                 # V3 的原始时机保持不变：每个 request 完成 allocation 和 demand restore
                 # 后立刻补固定安全窗口。V4 完整继承，不把它挪到 tick 末。
                 self._maintain_lazy_writeback_window_after_allocation()
@@ -637,7 +637,7 @@ class Scheduler:
                 if allocated:
                     self._maintain_lazy_writeback_window_after_allocation()
                 scheduled_seqs.append(seq)
-        if not scheduled_seqs and deferred_for_writeback:
+        if not scheduled_seqs and (deferred_for_writeback or self.pending_prefix_writebacks):
             self.metrics["scheduler_idle_step_count"] += 1
             return [], False
         assert scheduled_seqs
@@ -651,7 +651,7 @@ class Scheduler:
         protected = set()
         if self.enable_cpu_kv_offload:
             # 如果 prompt prefix 正在异步写回，抢占时不能把这些 block 立刻放回 free list。
-            # 标记为 release_on_complete，让 D2H 完成后再释放。
+            # 记录延迟释放引用，让 D2H 完成后再释放。
             self._mark_pending_writeback_release(seq.block_table)
             protected = self._pending_writeback_block_ids()
         if lost_tokens:
@@ -694,8 +694,8 @@ class Scheduler:
                     # finish 只把完整 prefix 释放到 inactive LRU；是否写回 CPU 交给下一轮 schedule 统一检查。
                     if not self.enable_lazy_cpu_kv_writeback:
                         # prompt 很短或 finish 时 eager 还没提交过，就补一次；
-                        # request 已结束，所以 pending D2H 完成后可以顺手 release。
-                        self._start_eager_prefix_writeback(seq, release_on_complete=True)
+                        # 释放引用统一由下面的 mark 记录，避免重复计数。
+                        self._start_eager_prefix_writeback(seq, release_on_complete=False)
                     self._mark_pending_writeback_release(seq.block_table)
                 protected = self._pending_writeback_block_ids() if self.enable_cpu_kv_offload else set()
                 # 已完成写回的 block 可以释放；仍在 D2H 的 block 继续 protected，后续 poll 完成后再释放。

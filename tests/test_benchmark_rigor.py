@@ -461,6 +461,92 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         self.assertEqual(scheduler.metrics["scheduler_idle_step_count"], 1)
         self.assertEqual(scheduler.metrics["scheduler_writeback_forced_wait_count"], 0)
 
+    def test_shared_pending_block_releases_every_request_reference(self):
+        released = []
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.enable_cpu_kv_offload = True
+        scheduler.enable_lazy_cpu_kv_writeback = False
+        scheduler.block_manager = SimpleNamespace(
+            mark_cpu_writeback_pending=lambda _entries: None,
+            register_cpu_blocks=lambda _entries: None,
+            release_blocks=lambda block_ids: released.extend(block_ids),
+        )
+        scheduler.pending_prefix_writebacks = {}
+        scheduler.pending_writeback_by_block_id = {}
+        scheduler.pending_writeback_by_hash = {}
+        scheduler.metrics = defaultdict(int)
+        scheduler.writeback_prefix_blocks = lambda *_args: {"writeback_ids": [41]}
+        scheduler.poll_prefix_writebacks = lambda _wait: {"completed_ids": [41]}
+
+        scheduler._submit_prefix_writeback_entries(
+            [(17, 3, [1, 2, 3, 4])], release_on_complete=False
+        )
+        scheduler._mark_pending_writeback_release([3])
+        scheduler._mark_pending_writeback_release([3])
+        scheduler._poll_prefix_writebacks()
+
+        self.assertEqual(released, [3, 3])
+
+    def test_decode_yields_when_pending_writeback_holds_capacity(self):
+        decode_seq = SimpleNamespace()
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque()
+        scheduler.running = deque([decode_seq])
+        scheduler.max_num_seqs = 1
+        scheduler.max_num_batched_tokens = 8
+        scheduler.pending_prefix_writebacks = {41: object()}
+        scheduler.block_manager = SimpleNamespace(can_append=lambda _seq: False)
+        scheduler._poll_prefix_writebacks = lambda wait=False: None
+        scheduler.preempt = lambda seq: scheduler.waiting.appendleft(seq)
+        scheduler.metrics = defaultdict(int)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertFalse(is_prefill)
+        self.assertEqual(scheduled, [])
+        self.assertEqual(list(scheduler.waiting), [decode_seq])
+        self.assertEqual(scheduler.metrics["scheduler_idle_step_count"], 1)
+
+    def test_deferred_prefill_does_not_count_restore_metrics(self):
+        first = self._new_prefill_seq()
+        first.num_blocks = 1
+        first.num_tokens = 4
+        deferred = self._new_prefill_seq()
+        allocations = []
+
+        def allocate(seq, _plan):
+            allocations.append(seq)
+            seq.block_table.append(0)
+            return []
+
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([first, deferred])
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 2
+        scheduler.max_num_batched_tokens = 6
+        scheduler.block_size = 4
+        scheduler.enable_cpu_kv_offload = True
+        scheduler.pending_prefix_writebacks = {}
+        scheduler.block_manager = SimpleNamespace(
+            get_allocate_plan=lambda seq, _cpu: {
+                "sources": [] if seq is first else [("cpu", 17, [1, 2, 3, 4])]
+            },
+            allocate=allocate,
+        )
+        scheduler._poll_prefix_writebacks = lambda wait=False: None
+        scheduler._maintain_lazy_writeback_window_after_allocation = lambda: None
+        scheduler.restore_prefix_blocks = lambda _entries: self.fail("deferred restore ran")
+        scheduler.metrics = defaultdict(int)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertTrue(is_prefill)
+        self.assertEqual(scheduled, [first])
+        self.assertEqual(allocations, [first])
+        self.assertEqual(scheduler.metrics["prefix_cache_lookup_count"], 1)
+        self.assertEqual(scheduler.metrics["cpu_prefix_cache_hit_count"], 0)
+        self.assertEqual(scheduler.metrics["cpu_sync_swapin_block_count"], 0)
+
     def test_naive_v3_ablation_disables_cpu_eviction_hints(self):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.enable_lazy_cpu_kv_writeback = True
