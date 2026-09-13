@@ -127,7 +127,7 @@ class LLMEngine:
         prefill_step_count = self.step_metrics["prefill_step_count"]
         decode_step_count = self.step_metrics["decode_step_count"]
         prefill_step_time = self.step_metrics["prefill_step_time_sec"]
-        decode_step_time = self.step_metrics["decode_step_time_sec"]
+        decode_engine_step_wall_time = self.step_metrics["decode_step_time_sec"]
         metrics.update({
             "request_latency_count": len(latencies),
             "request_latency_avg": sum(latencies) / len(latencies) if latencies else 0.0,
@@ -162,10 +162,9 @@ class LLMEngine:
                 if prefill_step_time else 0.0
             ),
             "decode_step_count": decode_step_count,
-            "decode_step_time_sec": decode_step_time,
-            "decode_step_time_total_sec": decode_step_time,
-            "decode_step_time_avg_sec": (
-                decode_step_time / decode_step_count if decode_step_count else 0.0
+            "decode_engine_step_wall_time_total_sec": decode_engine_step_wall_time,
+            "decode_engine_step_wall_time_avg_sec": (
+                decode_engine_step_wall_time / decode_step_count if decode_step_count else 0.0
             ),
             "decode_timed_tokens": self.step_metrics["decode_token_count_timed"],
             "schedule_time_sec": self.step_metrics["schedule_time_sec"],

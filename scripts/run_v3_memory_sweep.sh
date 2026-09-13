@@ -202,7 +202,7 @@ metrics = [
     "queueing_latency_max",
     "prefill_step_time_sec",
     "prefill_step_time_avg_sec",
-    "decode_step_time_sec",
+    "decode_engine_step_wall_time_total_sec",
     "prefix_cache_reused_token_count",
     "recomputed_token_count",
     "document_recomputed_tokens_est",

@@ -165,9 +165,8 @@ keys = [
     "prefill_timed_tok_per_sec",
     "prefill_token_count",
     "decode_step_count",
-    "decode_step_time_sec",
-    "decode_step_time_total_sec",
-    "decode_step_time_avg_sec",
+    "decode_engine_step_wall_time_total_sec",
+    "decode_engine_step_wall_time_avg_sec",
     "decode_timed_tokens",
     "prefix_cache_reused_token_count",
     "gpu_prefix_miss_request_count",
@@ -310,7 +309,7 @@ def add_speedups(dst, lhs, rhs, label):
         ("queueing_avg_speedup", "queueing_latency_avg"),
         ("queueing_p99_speedup", "queueing_latency_p99"),
         ("prefill_time_speedup", "prefill_step_time_sec"),
-        ("decode_time_speedup", "decode_step_time_sec"),
+        ("decode_engine_step_wall_time_speedup", "decode_engine_step_wall_time_total_sec"),
     ):
         denominator = mean(lhs, metric)
         dst[f"{out_key}_{label}"] = mean(rhs, metric) / denominator if denominator else 0.0

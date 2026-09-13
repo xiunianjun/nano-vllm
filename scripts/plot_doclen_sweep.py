@@ -113,7 +113,12 @@ def main():
         ("ttft_latency_median", "seconds", "Median TTFT", "ttft_median_baseline_vs_v1.svg"),
         ("request_latency_median", "seconds", "Median request latency", "request_latency_median_baseline_vs_v1.svg"),
         ("prefill_step_time_sec", "seconds", "Measured prefill step time", "prefill_time_baseline_vs_v1.svg"),
-        ("decode_step_time_sec", "seconds", "Measured decode step time", "decode_time_baseline_vs_v1.svg"),
+        (
+            "decode_engine_step_wall_time_total_sec",
+            "seconds",
+            "Cumulative decode engine-step wall time",
+            "decode_engine_step_wall_time_total_baseline_vs_v1.svg",
+        ),
         ("queueing_latency_avg", "seconds", "Queueing latency avg", "queueing_avg_baseline_vs_v1.svg"),
         ("queueing_latency_max", "seconds", "Queueing latency max", "queueing_max_baseline_vs_v1.svg"),
     ]
