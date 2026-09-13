@@ -177,6 +177,10 @@ class LLMEngine:
         schedule_start = perf_counter()
         seqs, is_prefill = self.scheduler.schedule()
         self.step_metrics["schedule_time_sec"] += perf_counter() - schedule_start
+        # 异步 writeback 尚未完成且当前没有可运行请求时，scheduler 返回 idle step。
+        # 立即交还外层 serving loop，使它可以接收新到达请求；不要调用空 batch model run。
+        if not seqs:
+            return [], 0
         if is_prefill:
             for seq in seqs:
                 if seq.seq_id in self.request_start_times and seq.seq_id not in self.first_scheduled_recorded:

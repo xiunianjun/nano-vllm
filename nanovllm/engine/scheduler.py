@@ -93,6 +93,10 @@ class Scheduler:
             "cpu_sync_swapin_block_count": 0,
             "cpu_sync_swapin_token_count": 0,
             "pending_prefix_writeback_count": 0,
+            "scheduler_prefill_writeback_defer_count": 0,
+            "scheduler_idle_step_count": 0,
+            "scheduler_writeback_forced_wait_count": 0,
+            "scheduler_writeback_forced_wait_wall_sec": 0.0,
             "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
             "lazy_writeback_completed_block_count": 0,
             "cpu_prefix_cache_evicted_metadata_count": 0,
@@ -134,6 +138,12 @@ class Scheduler:
             "cpu_sync_swapin_token_count": self.metrics["cpu_sync_swapin_token_count"],
             # 返回实时 pending 数，避免 reset 后 metrics 里的旧值和实际状态不一致。
             "pending_prefix_writeback_count": len(self.pending_prefix_writebacks),
+            "scheduler_prefill_writeback_defer_count": self.metrics["scheduler_prefill_writeback_defer_count"],
+            "scheduler_idle_step_count": self.metrics["scheduler_idle_step_count"],
+            "scheduler_writeback_forced_wait_count": self.metrics["scheduler_writeback_forced_wait_count"],
+            "scheduler_writeback_forced_wait_wall_sec": self.metrics[
+                "scheduler_writeback_forced_wait_wall_sec"
+            ],
             "lazy_writeback_target_block_count": self.lazy_writeback_target_blocks if self.enable_lazy_cpu_kv_writeback else 0,
             "lazy_writeback_completed_block_count": self.metrics["lazy_writeback_completed_block_count"],
             "cpu_prefix_cache_evicted_metadata_count": self.metrics["cpu_prefix_cache_evicted_metadata_count"],
@@ -522,6 +532,7 @@ class Scheduler:
         self._poll_prefix_writebacks()
         scheduled_seqs = []
         num_batched_tokens = 0
+        deferred_for_writeback = False
 
         # prefill
         while self.waiting and len(scheduled_seqs) < self.max_num_seqs:
@@ -548,9 +559,11 @@ class Scheduler:
                     self._poll_prefix_replacements(wait=True)
                     plan = self.block_manager.get_allocate_plan(seq, self.enable_cpu_kv_offload)
                 if plan is None and self.pending_prefix_writebacks:
-                    # 如果显存看似不够，先等待已发起的 writeback 完成
-                    self._poll_prefix_writebacks(wait=True)
-                    plan = self.block_manager.get_allocate_plan(seq, self.enable_cpu_kv_offload)
+                    # 不在 scheduler 内等待 D2H：已有 batch 就立即运行，有 Decode 就继续
+                    # 调度 Decode；两者都没有则返回 idle step，让 engine loop 有机会接收
+                    # 等待期间新到达的请求，并在下一 tick 再非阻塞 poll CUDA event。
+                    deferred_for_writeback = True
+                    self.metrics["scheduler_prefill_writeback_defer_count"] += 1
                 if plan is None:
                     break   # 如果还是不够，放弃本轮 prefill，等待下一轮调度。
                 num_cached_blocks = len(plan["sources"])
@@ -624,6 +637,9 @@ class Scheduler:
                 if allocated:
                     self._maintain_lazy_writeback_window_after_allocation()
                 scheduled_seqs.append(seq)
+        if not scheduled_seqs and deferred_for_writeback:
+            self.metrics["scheduler_idle_step_count"] += 1
+            return [], False
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))   # 重新插入队头，保证纯粹的FCFS
         if v4:

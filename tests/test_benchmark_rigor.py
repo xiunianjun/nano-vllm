@@ -397,6 +397,70 @@ class _BlockManagerStub:
 
 
 class SchedulerWritebackProtocolTests(unittest.TestCase):
+    @staticmethod
+    def _new_prefill_seq():
+        return SimpleNamespace(
+            block_table=[],
+            num_blocks=2,
+            num_tokens=8,
+            num_cached_tokens=0,
+            num_scheduled_tokens=0,
+            recompute_pending_tokens=0,
+            status=None,
+        )
+
+    def test_pending_writeback_does_not_block_runnable_decode(self):
+        prefill_seq = self._new_prefill_seq()
+        decode_seq = SimpleNamespace(num_scheduled_tokens=0, is_prefill=False)
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([prefill_seq])
+        scheduler.running = deque([decode_seq])
+        scheduler.max_num_seqs = 1
+        scheduler.max_num_batched_tokens = 8
+        scheduler.block_size = 4
+        scheduler.enable_cpu_kv_offload = True
+        scheduler.pending_prefix_writebacks = {41: object()}
+        scheduler.block_manager = SimpleNamespace(
+            get_allocate_plan=lambda _seq, _cpu: None,
+            can_append=lambda _seq: True,
+            may_append=lambda _seq: False,
+        )
+        polls = []
+        scheduler._poll_prefix_writebacks = lambda wait=False: polls.append(wait)
+        scheduler.metrics = defaultdict(int)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertFalse(is_prefill)
+        self.assertEqual(scheduled, [decode_seq])
+        self.assertEqual(polls, [False])
+        self.assertEqual(scheduler.metrics["scheduler_prefill_writeback_defer_count"], 1)
+        self.assertEqual(scheduler.metrics["scheduler_writeback_forced_wait_count"], 0)
+
+    def test_pending_writeback_returns_idle_when_no_batch_can_run(self):
+        prefill_seq = self._new_prefill_seq()
+        scheduler = Scheduler.__new__(Scheduler)
+        scheduler.waiting = deque([prefill_seq])
+        scheduler.running = deque()
+        scheduler.max_num_seqs = 1
+        scheduler.max_num_batched_tokens = 8
+        scheduler.block_size = 4
+        scheduler.enable_cpu_kv_offload = True
+        scheduler.pending_prefix_writebacks = {41: object()}
+        scheduler.block_manager = SimpleNamespace(get_allocate_plan=lambda _seq, _cpu: None)
+        polls = []
+        scheduler._poll_prefix_writebacks = lambda wait=False: polls.append(wait)
+        scheduler.metrics = defaultdict(int)
+
+        scheduled, is_prefill = scheduler.schedule()
+
+        self.assertFalse(is_prefill)
+        self.assertEqual(scheduled, [])
+        self.assertEqual(polls, [False])
+        self.assertEqual(scheduler.metrics["scheduler_prefill_writeback_defer_count"], 1)
+        self.assertEqual(scheduler.metrics["scheduler_idle_step_count"], 1)
+        self.assertEqual(scheduler.metrics["scheduler_writeback_forced_wait_count"], 0)
+
     def test_naive_v3_ablation_disables_cpu_eviction_hints(self):
         scheduler = Scheduler.__new__(Scheduler)
         scheduler.enable_lazy_cpu_kv_writeback = True

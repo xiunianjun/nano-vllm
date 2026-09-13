@@ -172,7 +172,7 @@ def record_step_metrics(llm, num_tokens, step_time):
         llm.step_metrics["prefill_step_count"] += 1
         llm.step_metrics["prefill_step_time_sec"] += step_time
         llm.step_metrics["prefill_token_count_timed"] += num_tokens
-    else:
+    elif num_tokens < 0:
         llm.step_metrics["decode_step_count"] += 1
         llm.step_metrics["decode_step_time_sec"] += step_time
         llm.step_metrics["decode_token_count_timed"] += -num_tokens
