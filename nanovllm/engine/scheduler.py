@@ -404,9 +404,9 @@ class Scheduler:
         self._submit_prefix_writeback_entries(entries, release_on_complete, lazy=False)
         seq.eager_prefix_writeback_done = True
 
-    def _decode_allocation_reserve_after_current_step(self, scheduled_seqs) -> int:
+    def _decode_allocation_reserve_after_current_step(self, current_batch) -> int:
         """精确预留下次 decode 跨 block 边界所需的 slots，而不是预留 max_num_seqs。"""
-        scheduled_ids = {id(seq) for seq in scheduled_seqs}
+        scheduled_ids = {id(seq) for seq in current_batch}
         reserve = 0
         for seq in list(self.running)[:self.max_num_seqs]:
             future_len = len(seq)
@@ -463,7 +463,7 @@ class Scheduler:
         self.metrics["lazy_writeback_after_alloc_trigger_count"] += 1
         self._maintain_lazy_writeback_window(max_entries)
 
-    def _prepare_v4_prefetch(self, scheduled_seqs):
+    def _prefetch_waiting_lookahead(self, current_batch):
         """本轮 allocation 完成后，利用本轮 GPU compute 覆盖下一轮的部分 H2D。"""
         if not self.enable_scheduler_aware_prefetch:
             return
@@ -472,7 +472,7 @@ class Scheduler:
         self.metrics["scheduler_visible_request_count_max"] = max(
             self.metrics["scheduler_visible_request_count_max"], len(visible)
         )
-        decode_reserve = self._decode_allocation_reserve_after_current_step(scheduled_seqs)
+        decode_reserve = self._decode_allocation_reserve_after_current_step(current_batch)
         _targeted_writebacks, replacement_count = self._plan_v4_prefetch(visible, decode_reserve)
         # V4 可以独立叠加在 V2 eager backing 上，此时没有 V3 安全窗口。
         # 只有 V2+V3+V4 且 prefetch 真正占用了 slot，才需要用原 V3
@@ -614,7 +614,7 @@ class Scheduler:
             # V4 只在 V3 demand/allocation 全部完成后追加 look-ahead prefetch；
             # V1/V2/V3 不经过这个入口。
             if v4:
-                self._prepare_v4_prefetch(scheduled_seqs)
+                self._prefetch_waiting_lookahead(scheduled_seqs)
             return scheduled_seqs, True         # 优先做prefill，且只做prefill
 
         # decode
@@ -643,7 +643,7 @@ class Scheduler:
         assert scheduled_seqs
         self.running.extendleft(reversed(scheduled_seqs))   # 重新插入队头，保证纯粹的FCFS
         if v4:
-            self._prepare_v4_prefetch(scheduled_seqs)
+            self._prefetch_waiting_lookahead(scheduled_seqs)
         return scheduled_seqs, False
 
     def preempt(self, seq: Sequence):

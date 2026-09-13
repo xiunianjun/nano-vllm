@@ -585,7 +585,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler.block_manager = block_manager
         scheduler.restore_prefix_blocks = lambda entries: events.append(("restore", entries))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append(("maintain", None))
-        scheduler._prepare_v4_prefetch = lambda _seqs: None
+        scheduler._prefetch_waiting_lookahead = lambda _current_batch: None
         scheduler._poll_prefix_writebacks = lambda wait=False: None
         scheduler.metrics = defaultdict(int)
 
@@ -622,7 +622,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 1))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
 
-        scheduler._prepare_v4_prefetch([])
+        scheduler._prefetch_waiting_lookahead([])
 
         self.assertEqual(events, ["prefetch"])
 
@@ -639,7 +639,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 1))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
 
-        scheduler._prepare_v4_prefetch([])
+        scheduler._prefetch_waiting_lookahead([])
 
         self.assertEqual(events, ["prefetch", "v3_window"])
 
@@ -656,7 +656,7 @@ class SchedulerWritebackProtocolTests(unittest.TestCase):
         scheduler._plan_v4_prefetch = lambda _visible, _reserve: (events.append("prefetch") or (0, 0))
         scheduler._maintain_lazy_writeback_window_after_allocation = lambda: events.append("v3_window")
 
-        scheduler._prepare_v4_prefetch([])
+        scheduler._prefetch_waiting_lookahead([])
 
         self.assertEqual(events, ["prefetch"])
 
