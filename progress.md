@@ -399,11 +399,19 @@ V2 相比 V1：
 
 临界区间位于 `30--40 blocks`：30 blocks 已因少量 GPU-only eviction 放大为整段文档 recompute，40 blocks 则与 60/130 的 cache traffic 和 recompute 行为一致。因此当前实验固定使用 `40 blocks`，而不是原先根据 `max_num_batched_tokens` 保守推导出的 130 blocks。
 
-这里的 40-block 水位主要用于吸收当前 request-level KV allocation 的瞬时 burst，并不代表 D2H 带宽本身需要这么大的长期 backlog。后续若改为 block-wise 或 layer-wise 的渐进分配/回收，分配突发会更平滑，所需安全窗口预计还能进一步缩小。
+这里的 40-block 水位主要用于吸收当前 request-level KV allocation 的瞬时 burst，并不代表 D2H 带宽本身需要这么大的长期 backlog。watermark 是与 prompt 长度、并发、缓存命中和传输进度有关的性能调参，不是保证所有 allocation 都能立即成功的容量或正确性边界。已提交 D2H 的 GPU block 在复制完成、引用和保护状态允许释放前，不能当作已可复用的 slot；空间不足时仍应由实际分配检查及等待/抢占逻辑正确处理。
+
+当前实验不考虑 chunked prefill，因此“每轮计算少量 token、首次却为整个 prompt 分配 blocks”的不匹配不是本轮实验中已触发的问题。当前整段 prefill 必须准备足以容纳实际计算结果的 KV 空间；估算新增 slots 时，需要按请求处理 block 取整并扣除可直接复用的 GPU prefix blocks，CPU 命中的 blocks 仍需要 GPU slots 接收 H2D。
+
+后续若研究 chunked prefill，可以将当前整段 prompt 的 KV 预分配改为随计算进度渐进式分配。例如 block size 为 256、prompt 为 8192 tokens、每轮计算 2048 tokens，且无缓存命中时，第一轮只分配 8 个 blocks，第二轮保留已有 KV 并追加 8 个，最终增长到 32 个。所需容量应按“已有有效 KV + 本轮将计算的 tokens”取整，再减去已分配的 blocks，并处理 prefix 复用及空间不足的情况。仅把分配改成 8 个、仍一次计算完整 8192 tokens 不成立。该方案要求计算分块与分配分块配合，降低的是提前占用和单次分配峰值，不减少完整上下文最终需要的 KV 容量；能否进一步缩小 watermark 仍需实测。这是后续改进方向，尚非本轮实现或测量结论。
 
 该 follow-up 是单 seed 快速定位；40 blocks 若作为跨 workload 或生产默认值，仍需补不同 seed、arrival rate 和 batch 形态验证。当前 workload 下更保守的选择是 60 blocks。
 
-### 7.5 GPU-aware CPU LRU：duplicate 容量浪费与初步修复
+### 7.5 GPU-aware CPU LRU：duplicate 容量与迁移成本的取舍
+
+CPU/GPU duplicate 不全是浪费。对已写满且内容不再变化的 prefix block，保留 CPU backing 后，GPU 副本在引用和保护状态允许时可直接淘汰，无需再次 D2H；后续访问则可从 CPU 做 H2D 恢复。如果先删除 CPU backing，未来 GPU 淘汰该 block 时就需要重新 D2H 并等待源 block 可安全释放，或者直接丢弃、承担后续 cache miss 的重算成本。因此 CPU backing 同时提供恢复能力和更低成本的 GPU 淘汰路径。
+
+另一方面，CPU 容量受限时，保留 duplicate 会挤占 CPU-only block 的空间，降低两级缓存的 unique coverage。GPU 中预计仍会保留较久的 block，其 CPU 副本适合优先淘汰；即将成为 GPU victim 的 block，其 CPU backing 则值得保护。优化目标应是 CPU 容量、D2H/H2D 流量、重算和请求延迟之间的平衡，而非尽量清除所有 duplicate。下面的 GPU-aware eviction 正是在增加 unique coverage 的同时保护近期 victim backing；其效果必须结合迁移 churn 和延迟判断，不能只看 duplicate ratio 下降。
 
 固定 40-block GPU watermark、16 GiB CPU hard cap 和 seed 1 后，旧实现末态有 455 个 CPU block、224 个 GPU prefix block，其中 199 个同时存在于 CPU/GPU。CPU cache 的 43.7% 被 duplicate 占据，CPU+GPU 合并后只有 480 个 unique blocks，无法覆盖 576-block working set。
 
@@ -495,7 +503,7 @@ CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomput
 
 1. 为 GPU-aware CPU eviction 增加 hysteresis/软保护区，降低刚淘汰 CPU backing 又发生 GPU eviction 的迁移 churn，并用 16 GiB 同 trace 复核 recompute、GPU-only eviction 和 D2H/H2D。
 2. 用更多 seed 在 14--16 GiB 附近复核 GPU-aware V3 的边界，并在 18--20 GiB 附近复核 Naive V3；当前单-seed 粗扫已将两者的实用边界分别定位为 15 和 19 GiB。
-3. 在不同 seed、arrival rate 和 batch 形态下复核 40 blocks；若需要无需复核即可使用的保守点，采用 60 blocks。
+3. 在不同 seed、arrival rate 和 batch 形态下复核 40 blocks；60 blocks 仅是当前 workload 下更保守的已测选择，不是跨 workload 无需验证的保证。后续若研究 chunked prefill，配套实现渐进式 KV 分配，再重新扫描 watermark。
 4. 增加 request-rate sweep，直到接近饱和，分别报告 offered load、achieved throughput、queueing 和 tail latency。
 5. 如需评价 decode 用户体验，新增逐 token timestamp 并报告 ITL/TBT 分布；随后按 decode batch size profile 单步 model runner、copy overlap 和 scheduler 间隔，解释 V2 剩余的单步 wall-time 差异。
 6. 如需“纯 recompute”对照，新增同时关闭 CPU offload 和 GPU LRU 的独立模式，并给现有 baseline 重命名，避免口径混淆。
