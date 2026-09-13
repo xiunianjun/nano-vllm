@@ -1,6 +1,6 @@
 # nano-vLLM GPU+CPU Prefix Cache 进展
 
-> 更新时间：2026-09-03
+> 更新时间：2026-09-13
 >
 > 当前三-seed基准：`exp/prefix_cache_hotset12_20260902_110808/`
 >
@@ -54,14 +54,14 @@ GPU miss + CPU miss  -> 正常 prefill / recompute
 - V1 的 CPU eager writeback 保持不变。
 - 请求结束后，完整 prefix block 进入 inactive GPU LRU，不立即丢弃。
 - 新请求命中 inactive block 时重新激活，避免一次 CPU H2D。
-- 需要空间时先使用真正 free block，再驱逐 inactive LRU block；优先驱逐已有 CPU backing 的 block。
+- 需要空间时先使用真正 free block，再严格按 inactive GPU LRU 驱逐；当前 allocation 已命中的 block 和仍在 writeback 的 pending block 不可选。V2 会 eager 写回全部完整 prefix，因此合法的 inactive victim 默认都已有 CPU backing；这里不需要、也没有额外的“CPU-backed 优先”重排。
 - 同一请求按逆序释放，使更通用、靠近 prefix 根部的 block在相同 recency 下保留更久。
 
 V2 相对 V1 的核心评价指标是 GPU LRU hits、同步 swapin blocks、H2D bytes、restore time 和 prefill time，而不是只看最终吞吐。
 
 ### V3：memory-aware lazy writeback
 
-V3 不再把所有完成的 prefix 立刻写入 CPU。每次 request 真正发生 allocation 后（CPU hit 时先完成同步 restore），它立即从 inactive LRU 的 eviction end 选择 GPU-only blocks 做异步 D2H，补充可安全驱逐的 block：
+V3 不再把所有完成的 prefix 立刻写入 CPU。每次 request 真正发生 allocation 后（CPU hit 时先完成同步 restore），它立即从 inactive LRU 的 eviction end 选择 GPU-only blocks 做异步 D2H，补充可安全驱逐的 block。V2/V3 的实际 GPU eviction 都保持同一套严格 LRU；区别是 V2 的合法 victim 因 eager writeback 默认已经 CPU-backed，而 V3 通过下面的安全窗口让即将被 LRU 淘汰的前沿 blocks 尽量提前获得 CPU backing：
 
 ```text
 target_blocks = ceil(max_num_batched_tokens / block_size)
@@ -326,7 +326,7 @@ cpu_physical_budget_ok = true
 指标解释：
 
 - request latency、TTFT、queueing 是每轮 252 个 measured requests 的分布统计，再对三轮统计量求均值。
-- prefill/decode time 是 measured window 内相应 engine steps 的累计时间。
+- prefill time 是 measured window 内 prefill engine steps 的累计时间；表中的 `decode engine-step wall total` 是所有 decode `engine.step()` 调用 wall time 的累加，不是单请求 decode latency、所有请求 decode latency 之和或 TBT。
 - `document_recomputed_tokens_est` 是按未复用文档 prefix 估算的重算量，用于跨模式解释机制。
 - achieved throughput 在本轮主要由 2 req/s 的 offered load 限制，不是系统饱和吞吐；性能结论应以 latency、TTFT、prefill 和 cache traffic 为主。
 
@@ -336,7 +336,7 @@ cpu_physical_budget_ok = true
 
 以下均为 3 次运行的均值：
 
-| mode | median req | p99 req | median TTFT | p99 TTFT | prefill total | decode total | achieved req/s |
+| mode | median req | p99 req | median TTFT | p99 TTFT | prefill total | decode engine-step wall total | achieved req/s |
 |---|---:|---:|---:|---:|---:|---:|---:|
 | GPU-only baseline | 0.857s | 2.215s | 0.253s | 1.359s | 41.062s | 47.719s | 2.067 |
 | V1 | 0.542s | 0.923s | 0.063s | 0.124s | 14.200s | 63.056s | 2.070 |
@@ -377,7 +377,7 @@ V2 相比 V1：
 - restore time：5.709 -> 3.588s，减少 37.2%。
 - prefill paired speedup：1.123x。
 
-端到端 median request 只提升约 1.1%，不是 V2 没生效，而是本轮 arrival rate 没有把吞吐打满，且 decode 累计时间在 offload 模式中高于 baseline。V2 的机制收益应由 traffic/restore/prefill 指标直接说明。
+端到端 median request 只提升约 1.1%，不是 V2 没生效，而是本轮 arrival rate 没有把吞吐打满。offload 模式的累计 decode engine-step wall time虽高于 baseline，但它主要反映 batch 形态变化，不能直接解释为单请求 decode 变慢；V2 的直接机制收益应由 traffic/restore/prefill 指标说明，最终用户体验则看 request latency、TTFT，以及未来单独采集的 TBT。
 
 ### 7.3 本轮不能证明 V3 的内存收益
 
@@ -458,9 +458,23 @@ CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomput
 
 以上百分比以比较对象的 CPU 内存为分母，使用配置值便于表达；实际 block 对应的 peak 分别约为 20.25、18.98 和 14.98 GiB，结论不变。该边界来自相同 trace 的单 seed 快速定位，适合说明当前 workload 下的容量差异，不应解释为跨 seed 的统计置信区间。
 
-### 7.7 仍需解释的性能现象
+### 7.7 累计 decode engine-step wall time 的归因与指标边界
 
-- offload 模式 decode total 为 63--66s，高于 baseline 的 47.7s。可能涉及 restore/transfer 对 model step 的干扰、不同 batch/step 形态或 eager-mode 开销，需要单独 profile。
+原表中的 `decode total` 已重命名为 `decode engine-step wall total`。它把 measured window 内每次 decode `engine.step()` 的 wall time 累加一次：一个 batch 无论包含 1 个还是多个请求都只累计一次 step wall time。因此它描述引擎为完成本轮 decode token 所执行的 step 数及 batch 效率，不是单请求 decode latency，也不能直接换算成 TBT。
+
+三轮原始数据给出的均值如下；各模式实际计时的 decode tokens 基本相同：
+
+| mode | decode tokens | decode steps | 平均每 step 请求数 | 平均 step wall time | engine-step wall total |
+|---|---:|---:|---:|---:|---:|
+| GPU-only baseline | 3,789.7 | 1,705.0 | 2.223 | 27.99ms | 47.72s |
+| V1 | 3,784.0 | 2,233.7 | 1.694 | 28.23ms | 63.06s |
+| V2 | 3,783.7 | 2,206.0 | 1.715 | 29.79ms | 65.72s |
+| V3 | 3,787.7 | 2,237.7 | 1.693 | 28.63ms | 64.07s |
+
+累计值增加的主要原因不是多生成了 token，而是 offload 将长 prefix 的 prefill/recompute 大幅缩短后，FCFS、prefill 优先且 prefill/decode 不混批的 scheduler 更早恢复 decode；此时同时 running 的请求更少，decode batch 从 baseline 的平均 `2.223` 缩至约 `1.69--1.72`，于是完成近似相同 token 数需要约 30% 更多 engine steps。反过来，baseline 的长 recompute 会让 decode 请求等待并聚集，形成更大的 decode batch，因此累计 decode step wall time 更低，但其 TTFT 和 E2E request latency 明显更差。这是当前 workload 与 scheduler 语义下真实的 batching effect，不是 prefix offloading 把单个请求的 decode KV offload 后又读回；active request 的 KV 仍保留在 GPU。
+
+单步 wall time 总体同量级，支持 batch 形态是主因；V2 的平均单步时间仍略高，可能包含 eager 模式波动、copy/compute 资源竞争或不同 batch size 分布，现有汇总指标不足以继续归因。当前 benchmark 已测 request latency（E2E）和 TTFT，但没有记录逐 token 时间戳，因此不能从该累计值断言 TBT 变快、变慢或不变。如需评价 decode 用户体验，应新增 ITL/TBT 分布；如需解释剩余单步差异，再按 batch size profile model runner、copy overlap 和 scheduler 间隔。
+
 - achieved throughput 四种模式都约 2.07 req/s，是 arrival-limited 结果，不能外推最大吞吐能力。
 - 本轮强制 eager，不能据此评价 CUDA Graph 路径优化。
 - 只有 3 个独立 seed。median 和 prefill 趋势较清楚，但 p99 与 V2/V3 之间的小差异 CI 很宽，不宜下显著性结论。
@@ -483,7 +497,7 @@ CPU 内存拐点不由 E2E median 单独决定。主判据是 `document_recomput
 2. 用更多 seed 在 14--16 GiB 附近复核 GPU-aware V3 的边界，并在 18--20 GiB 附近复核 Naive V3；当前单-seed 粗扫已将两者的实用边界分别定位为 15 和 19 GiB。
 3. 在不同 seed、arrival rate 和 batch 形态下复核 40 blocks；若需要无需复核即可使用的保守点，采用 60 blocks。
 4. 增加 request-rate sweep，直到接近饱和，分别报告 offered load、achieved throughput、queueing 和 tail latency。
-5. profile offload 模式较高的 decode time，拆分 model runner、transfer 和 scheduler 干扰。
+5. 如需评价 decode 用户体验，新增逐 token timestamp 并报告 ITL/TBT 分布；随后按 decode batch size profile 单步 model runner、copy overlap 和 scheduler 间隔，解释 V2 剩余的单步 wall-time 差异。
 6. 如需“纯 recompute”对照，新增同时关闭 CPU offload 和 GPU LRU 的独立模式，并给现有 baseline 重命名，避免口径混淆。
 7. 对 V2/V2+V4 和 V2+V3/V2+V3+V4 分别补至少 5 个 seeds，分开报告纯预取收益与叠加内存约束后的收益，并保留 raw per-run 数据、paired ratios 和 Student-t CI。
 
